@@ -1,0 +1,1 @@
+"""ARCH-BOARD backend application."""

@@ -5,8 +5,9 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import engine
-from app.models import Base
-from app.routes import boards, health
+from app.models.base import Base
+from app.models import boards, users
+from app.routes import auth, boards as board_routes
 
 
 @asynccontextmanager
@@ -26,4 +27,5 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(boards.router)
+app.include_router(board_routes.router)
+app.include_router(auth.router)
