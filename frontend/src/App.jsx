@@ -57,7 +57,45 @@ export default function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark')
   const socketRef = useRef(null)
   const documentRef = useRef({ nodes: [], edges: [] })
-  const boardCacheRef = useRef({}) // Cache for unsaved state per board
+  const boardCacheRef = useRef({}) // In-memory cache for unsaved state per board
+  const deletedBoardIdsRef = useRef(new Set()) // Prevent stale board-list requests from restoring deleted boards
+  const boardListRequestRef = useRef(0) // Ignore stale /boards responses
+  const boardLoadRef = useRef(0) // Ignore stale board-load responses
+  const hydratedBoardRef = useRef(null) // Tracks the board whose state is currently loaded
+  const dirtyRef = useRef(false) // Current board has unsaved local changes
+
+  const draftStorageKey = (boardId) => `archboard_draft_${boardId}`
+
+  const readStoredDraft = (boardId) => {
+    try {
+      const raw = sessionStorage.getItem(draftStorageKey(boardId))
+      if (!raw) return null
+      const parsed = JSON.parse(raw)
+      if (!parsed?.document) return null
+      return {
+        name: typeof parsed.name === 'string' ? parsed.name : null,
+        document: normalizeDocument(parsed.document),
+      }
+    } catch {
+      return null
+    }
+  }
+
+  const writeStoredDraft = (boardId, draft) => {
+    try {
+      sessionStorage.setItem(draftStorageKey(boardId), JSON.stringify(draft))
+    } catch {
+      // Ignore storage failures; the in-memory cache still protects board switching.
+    }
+  }
+
+  const clearStoredDraft = (boardId) => {
+    try {
+      sessionStorage.removeItem(draftStorageKey(boardId))
+    } catch {
+      // Ignore storage failures.
+    }
+  }
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -67,6 +105,16 @@ export default function App() {
   useEffect(() => {
     documentRef.current = { nodes, edges }
   }, [nodes, edges])
+
+  // Persist only unsaved changes, so a refresh restores the draft instead of
+  // replacing it with the older document from the database.
+  useEffect(() => {
+    if (!board || hydratedBoardRef.current !== board.id || !dirtyRef.current) return
+    writeStoredDraft(board.id, {
+      name,
+      document: { nodes, edges },
+    })
+  }, [board, name, nodes, edges])
 
   const submitAuth = async (event) => {
     event.preventDefault()
@@ -102,6 +150,7 @@ export default function App() {
   }
 
   const logout = () => {
+    dirtyRef.current = false
     localStorage.removeItem(TOKEN_KEY)
     setAuthUser(null)
     setBoard(null)
@@ -114,6 +163,7 @@ export default function App() {
   }
 
   const onConnect = useCallback((connection) => {
+    dirtyRef.current = true
     setEdges((current) => {
       const next = addEdge({ ...connection, animated: true }, current)
       sendSocketMessage(socketRef, { type: 'document:update', document: { nodes: documentRef.current.nodes, edges: next } })
@@ -122,6 +172,7 @@ export default function App() {
   }, [])
 
   const handleNodesChange = useCallback((changes) => {
+    dirtyRef.current = true
     setNodes((current) => {
       const next = applyNodeChanges(changes, current)
       sendSocketMessage(socketRef, { type: 'document:update', document: { nodes: next, edges: documentRef.current.edges } })
@@ -130,6 +181,7 @@ export default function App() {
   }, [])
 
   const handleEdgesChange = useCallback((changes) => {
+    dirtyRef.current = true
     setEdges((current) => {
       const next = applyEdgeChanges(changes, current)
       sendSocketMessage(socketRef, { type: 'document:update', document: { nodes: documentRef.current.nodes, edges: next } })
@@ -138,6 +190,7 @@ export default function App() {
   }, [])
 
   const createBoard = async () => {
+    dirtyRef.current = false
     const freshBoardName = 'Untitled architecture'
     setName(freshBoardName)
     setNodes([])
@@ -150,6 +203,9 @@ export default function App() {
     })
     if (!response.ok) throw new Error('Could not create board')
     const created = await response.json()
+    deletedBoardIdsRef.current.delete(created.id)
+    clearStoredDraft(created.id)
+    delete boardCacheRef.current[created.id]
     setBoard(created)
     setBoards((current) => [created, ...current])
     setBoilerplate(null)
@@ -168,29 +224,39 @@ export default function App() {
 
   const openBoard = useCallback(async (boardId) => {
     if (!boardId) return
+
+    const loadId = ++boardLoadRef.current
     const response = await fetch(`${API_URL}/boards/${boardId}`)
     if (!response.ok) throw new Error('Board not found')
     const loadedBoard = await response.json()
-    let document = normalizeDocument(loadedBoard.document)
-    
-    // Check if we have cached unsaved state for this board
-    if (boardCacheRef.current[boardId]) {
-      document = boardCacheRef.current[boardId]
-    }
-    
+
+    // A draft can exist in memory (when switching boards) or in sessionStorage
+    // (when the page itself was refreshed). Prefer it over the DB document.
+    const cachedDraft = boardCacheRef.current[boardId]
+    const storedDraft = readStoredDraft(boardId)
+    const draft = cachedDraft || storedDraft
+    const document = draft?.document || normalizeDocument(loadedBoard.document)
+    const loadedName = draft?.name ?? loadedBoard.name
+    dirtyRef.current = Boolean(draft)
+
+    // Ignore a slower request if the user has already selected another board.
+    if (loadId !== boardLoadRef.current) return
+
     setBoard(loadedBoard)
     setBoilerplate(null)
-    setName(loadedBoard.name)
+    setName(loadedName)
     setNodes(document.nodes)
     setEdges(document.edges)
     documentRef.current = document
+    hydratedBoardRef.current = boardId
     window.history.replaceState({}, '', `?board=${loadedBoard.id}`)
-    setStatus('Board loaded. Live collaboration connected.')
+    setStatus(draft ? 'Unsaved changes restored. Live collaboration connected.' : 'Board loaded. Live collaboration connected.')
   }, [setEdges, setNodes])
 
   const saveBoard = async () => {
     if (!board) return
-    const response = await fetch(`${API_URL}/boards/${board.id}`, {
+    const boardId = board.id
+    const response = await fetch(`${API_URL}/boards/${boardId}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, document: { nodes, edges } }),
     })
@@ -198,17 +264,25 @@ export default function App() {
     const updatedBoard = await response.json()
     setBoard(updatedBoard)
     setBoards((current) => current.map((currentBoard) => currentBoard.id === updatedBoard.id ? updatedBoard : currentBoard))
-    // Clear cache when saved
-    delete boardCacheRef.current[board.id]
+    delete boardCacheRef.current[boardId]
+    clearStoredDraft(boardId)
+    dirtyRef.current = false
     setStatus('Saved.')
   }
 
   const handleBoardSelection = async (nextBoardId) => {
     if (!nextBoardId || nextBoardId === board?.id) return
-    // Cache current unsaved state before leaving
-    if (board) {
-      boardCacheRef.current[board.id] = { ...documentRef.current }
+
+    // Cache the current board only when it has unsaved changes.
+    if (board && dirtyRef.current) {
+      const draft = {
+        name,
+        document: normalizeDocument(documentRef.current),
+      }
+      boardCacheRef.current[board.id] = draft
+      writeStoredDraft(board.id, draft)
     }
+
     await openBoard(nextBoardId)
   }
 
@@ -217,16 +291,30 @@ export default function App() {
     const confirmed = window.confirm(`Delete "${board.name}"? This action cannot be undone.`)
     if (!confirmed) return
 
-    const response = await fetch(`${API_URL}/boards/${board.id}`, { method: 'DELETE' })
+    const boardId = board.id
+
+    // Invalidate any board-list request that started before the delete.
+    // We do not reload the page or re-fetch /boards after deleting.
+    boardListRequestRef.current += 1
+
+    const response = await fetch(`${API_URL}/boards/${boardId}`, { method: 'DELETE' })
     if (!response.ok) throw new Error('Could not delete board')
 
-    setBoards((current) => current.filter((savedBoard) => savedBoard.id !== board.id))
-    delete boardCacheRef.current[board.id]
+    // Only after the server confirms deletion do we remove it from the dropdown.
+    // The deleted id stays blocked so no stale request can add it back.
+    deletedBoardIdsRef.current.add(boardId)
+    setBoards((current) => current.filter((savedBoard) => savedBoard.id !== boardId))
+    delete boardCacheRef.current[boardId]
+    clearStoredDraft(boardId)
+    dirtyRef.current = false
+    boardLoadRef.current += 1
+    hydratedBoardRef.current = null
     setBoard(null)
     setBoilerplate(null)
     setName('Untitled architecture')
     setNodes([])
     setEdges([])
+    documentRef.current = emptyDocument
     window.history.replaceState({}, '', window.location.pathname)
     setStatus('Board deleted.')
   }
@@ -264,6 +352,7 @@ export default function App() {
   }
 
   const addNode = (item) => {
+    dirtyRef.current = true
     const next = makeNode(item, nodes.length)
     setNodes((current) => {
       const updated = [...current, next]
@@ -310,6 +399,7 @@ export default function App() {
         const document = normalizeDocument(message.document)
         setNodes(document.nodes)
         setEdges(document.edges)
+        documentRef.current = document
         setStatus('Board updated by a teammate.')
       }
     }
@@ -321,8 +411,10 @@ export default function App() {
   }, [authReady, authUser, board, setEdges, setNodes])
 
   useEffect(() => {
+    if (!authReady || !authUser) return
+
     const boardId = new URLSearchParams(window.location.search).get('board')
-    if (!boardId) return
+    if (!boardId || hydratedBoardRef.current === boardId) return
 
     openBoard(boardId)
       .catch(() => setStatus('Could not load this board link.'))
@@ -330,13 +422,29 @@ export default function App() {
 
   useEffect(() => {
     if (!authReady || !authUser) return
+
+    const requestId = ++boardListRequestRef.current
+
     fetch(`${API_URL}/boards`)
       .then((response) => {
         if (!response.ok) throw new Error('Could not load boards')
         return response.json()
       })
-      .then(setBoards)
-      .catch(() => setStatus('Could not load your saved boards.'))
+      .then((loadedBoards) => {
+        // A delete may have happened while this request was in flight.
+        // Never let that old response restore the deleted option.
+        if (requestId !== boardListRequestRef.current) return
+
+        const filteredBoards = loadedBoards.filter(
+          (savedBoard) => !deletedBoardIdsRef.current.has(savedBoard.id)
+        )
+        setBoards(filteredBoards)
+      })
+      .catch(() => {
+        if (requestId === boardListRequestRef.current) {
+          setStatus('Could not load your saved boards.')
+        }
+      })
   }, [authReady, authUser])
 
   if (!authReady) {
@@ -384,7 +492,7 @@ export default function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div className="board-title"><span className="eyebrow">CURRENT BOARD</span><input value={name} onChange={(event) => setName(event.target.value)} aria-label="Board name" /></div>
+          <div className="board-title"><span className="eyebrow">CURRENT BOARD</span><input value={name} onChange={(event) => { dirtyRef.current = true; setName(event.target.value) }} aria-label="Board name" /></div>
           <div className="actions">
             <div className="account-chip"><span className="avatar">{authUser.username.slice(0, 1).toUpperCase()}</span><div><strong>{authUser.username}</strong><small>Architect</small></div><button className="text-button" onClick={logout}>Sign out</button></div>
             <button className="theme-toggle" onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}>
