@@ -63,6 +63,7 @@ export default function App() {
   const boardLoadRef = useRef(0) // Ignore stale board-load responses
   const hydratedBoardRef = useRef(null) // Tracks the board whose state is currently loaded
   const dirtyRef = useRef(false) // Current board has unsaved local changes
+  const waitingForLiveDocumentRef = useRef(false)
 
   const draftStorageKey = (boardId) => `archboard_draft_${boardId}`
 
@@ -226,31 +227,37 @@ export default function App() {
     if (!boardId) return
 
     const loadId = ++boardLoadRef.current
+    waitingForLiveDocumentRef.current = true
+
     const response = await fetch(`${API_URL}/boards/${boardId}`)
     if (!response.ok) throw new Error('Board not found')
+
     const loadedBoard = await response.json()
 
-    // A draft can exist in memory (when switching boards) or in sessionStorage
-    // (when the page itself was refreshed). Prefer it over the DB document.
+    // Ignore a slower request if the user selected another board.
+    if (loadId !== boardLoadRef.current) return
+
+    // Use a local draft only as a temporary recovery state. Once the
+    // WebSocket connects, the server's live document becomes authoritative.
     const cachedDraft = boardCacheRef.current[boardId]
     const storedDraft = readStoredDraft(boardId)
     const draft = cachedDraft || storedDraft
-    const document = draft?.document || normalizeDocument(loadedBoard.document)
-    const loadedName = draft?.name ?? loadedBoard.name
-    dirtyRef.current = Boolean(draft)
 
-    // Ignore a slower request if the user has already selected another board.
-    if (loadId !== boardLoadRef.current) return
+    const initialDocument = draft?.document || normalizeDocument(loadedBoard.document)
+    const initialName = draft?.name ?? loadedBoard.name
+
+    dirtyRef.current = Boolean(draft)
 
     setBoard(loadedBoard)
     setBoilerplate(null)
-    setName(loadedName)
-    setNodes(document.nodes)
-    setEdges(document.edges)
-    documentRef.current = document
+    setName(initialName)
+    setNodes(initialDocument.nodes)
+    setEdges(initialDocument.edges)
+    documentRef.current = initialDocument
     hydratedBoardRef.current = boardId
+
     window.history.replaceState({}, '', `?board=${loadedBoard.id}`)
-    setStatus(draft ? 'Unsaved changes restored. Live collaboration connected.' : 'Board loaded. Live collaboration connected.')
+    setStatus(draft ? 'Restoring board. Connecting to live state...' : 'Connecting to live board...')
   }, [setEdges, setNodes])
 
   const saveBoard = async () => {
@@ -380,32 +387,69 @@ export default function App() {
   useEffect(() => {
     if (!board) return undefined
     if (!authReady || !authUser) return undefined
-    const socketUrl = `${WS_URL}/ws/boards/${board.id}`
+
+    const boardId = board.id
+    const socketUrl = `${WS_URL}/ws/boards/${boardId}`
     const socket = new WebSocket(socketUrl)
+
     socketRef.current = socket
-    
+
     socket.onopen = () => {
-      // When reconnecting, sync current state with other users
-      sendSocketMessage(socketRef, { type: 'document:update', document: documentRef.current })
+      console.log(`WebSocket connected for board ${boardId}`)
+      // Never push local state on connect. The server sends the current
+      // authoritative live document immediately after connection.
     }
-    
+
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data)
+
       console.log('WebSocket message:', message)
+
       if (message.type === 'presence') {
         console.log(`User ${message.event} the board`)
+        return
       }
-      if (message.type === 'document:update' && message.document) {
+
+      // Server sends the current live document immediately on join/rejoin.
+      if (message.type === 'document:load' && message.document) {
         const document = normalizeDocument(message.document)
+
         setNodes(document.nodes)
         setEdges(document.edges)
         documentRef.current = document
+
+        // The server's live state is authoritative when joining/rejoining.
+        dirtyRef.current = false
+        waitingForLiveDocumentRef.current = false
+
+        setStatus('Board loaded successfully.')
+        return
+      }
+
+      // Another user made a live change.
+      if (message.type === 'document:update' && message.document) {
+        const document = normalizeDocument(message.document)
+
+        setNodes(document.nodes)
+        setEdges(document.edges)
+        documentRef.current = document
+
         setStatus('Board updated by a teammate.')
       }
     }
-    socket.onerror = () => setStatus('Live connection unavailable; changes can still be saved.')
+
+    socket.onerror = () => {
+      setStatus('Live connection unavailable; changes can still be saved.')
+    }
+
+    socket.onclose = () => {
+      console.log(`WebSocket disconnected for board ${boardId}`)
+    }
+
     return () => {
-      if (socketRef.current === socket) socketRef.current = null
+      if (socketRef.current === socket) {
+        socketRef.current = null
+      }
       socket.close()
     }
   }, [authReady, authUser, board, setEdges, setNodes])
