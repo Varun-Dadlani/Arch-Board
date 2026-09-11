@@ -8,4 +8,8 @@ backend/app/__pycache__/
 node_modules/
 dist/
 .vite/
-docs/workflow.md
+benchmark_websockets.py
+benchmark_redis.py
+test_redis_pub-sub.py
+test.py
+

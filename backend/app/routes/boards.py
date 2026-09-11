@@ -49,7 +49,7 @@ async def update_board(board_id: UUID, payload: BoardUpdate, db: AsyncSession = 
     await db.commit()
     await db.refresh(board)
     # Clear live state when saved to DB
-    manager.clear_live_document(board_id)
+    await manager.clear_live_document(board_id)
     return board
 
 
@@ -61,7 +61,7 @@ async def delete_board(board_id: UUID, db: AsyncSession = Depends(get_db)) -> No
     await db.delete(board)
     await db.commit()
     # Clear live state when board is deleted
-    manager.clear_live_document(board_id)
+    await manager.clear_live_document(board_id)
 
 
 @router.post("/boards/{board_id}/boilerplate", response_model=BoilerplateRead)
@@ -105,7 +105,7 @@ async def board_socket(
         # ------------------------------------------------
         # Get the current LIVE document.
         # ------------------------------------------------
-        live_document = manager.get_live_document(board_id)
+        live_document = await manager.get_live_document(board_id)
 
         # ------------------------------------------------
         # First user / server restart:
@@ -122,7 +122,7 @@ async def board_socket(
 
                 live_document = board.document or {}
 
-                manager.update_live_document(
+                await manager.update_live_document(
                     board_id,
                     live_document,
                 )
@@ -174,18 +174,25 @@ async def board_socket(
                 document = message.get("document")
 
                 if document is not None:
-                    manager.update_live_document(
+                    await manager.update_live_document(
                         board_id,
                         document,
                     )
 
-            # Broadcast to everyone except sender.
+            # Broadcast to clients connected to THIS server.
             await manager.broadcast(
                 board_id,
                 message,
                 sender=websocket,
             )
 
+            # Publish so OTHER FastAPI servers receive it.
+            await manager.publish(
+                board_id,
+                message,
+            )
+            
+    
     except WebSocketDisconnect:
         manager.disconnect(board_id, websocket)
 

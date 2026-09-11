@@ -403,10 +403,10 @@ export default function App() {
     socket.onmessage = (event) => {
       const message = JSON.parse(event.data)
 
-      console.log('WebSocket message:', message)
+      //console.log('WebSocket message:', message)
 
       if (message.type === 'presence') {
-        console.log(`User ${message.event} the board`)
+        //console.log(`User ${message.event} the board`)
         return
       }
 
