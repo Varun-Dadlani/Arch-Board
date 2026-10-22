@@ -4,7 +4,7 @@ import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from fastapi import WebSocket
 from app.core.security import decode_access_token
 from app.database import get_db
 from app.models.users import User
@@ -30,4 +30,25 @@ async def get_current_user(
     user = await db.get(User, user_id)
     if user is None:
         raise unauthorized
+    return user
+
+
+
+async def get_current_user_ws(
+    websocket: WebSocket,
+    db: AsyncSession,
+) -> User | None:
+
+    token = websocket.query_params.get("token")
+
+    if not token:
+        return None
+
+    try:
+        user_id = UUID(decode_access_token(token))
+    except (ValueError, jwt.InvalidTokenError):
+        return None
+
+    user = await db.get(User, user_id)
+
     return user
