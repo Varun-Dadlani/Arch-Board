@@ -9,11 +9,16 @@ from app.database import SessionLocal,get_db
 from app.boilerplate import create_boilerplate_zip, generate_boilerplate
 from app.models.boards import Board
 from app.models.board_members import BoardMember
+from app.models.users import User
 from app.realtime import manager
-from app.schemas.boards import BoardCreate, BoardMemberAdd, BoardRead, BoardUpdate, BoilerplateCreate, BoilerplateRead
+from app.schemas.boards import BoardCreate, BoardMemberAdd, BoardMemberRead, BoardRead, BoardUpdate, BoilerplateCreate, BoilerplateRead
 from app.core.dependencies import get_current_user, get_current_user_ws
 
 router = APIRouter(tags=["boards"])
+
+
+def board_read(board: Board, member_role: str) -> BoardRead:
+    return BoardRead.model_validate(board).model_copy(update={"member_role": member_role})
 
 
 @router.post("/boards", response_model=BoardRead, status_code=201)
@@ -45,18 +50,20 @@ async def create_board(
     await db.commit()
     await db.refresh(board)
 
-    return board
+    return board_read(board, "owner")
 
 
 @router.get("/boards", response_model=list[BoardRead])
 async def list_boards(
     db: AsyncSession = Depends(get_db),
     user=Depends(get_current_user),
-) -> list[Board]:
+) -> list[BoardRead]:
     result = await db.execute(
-        select(Board).join(BoardMember).where(BoardMember.user_id == user.id)
+        select(Board, BoardMember.role)
+        .join(BoardMember)
+        .where(BoardMember.user_id == user.id)
     )
-    return result.scalars().all()
+    return [board_read(board, role) for board, role in result.all()]
 
 
 @router.get("/boards/{board_id}", response_model=BoardRead)
@@ -70,7 +77,7 @@ async def get_board(board_id: UUID, db: AsyncSession = Depends(get_db),user=Depe
         raise HTTPException(status_code=404, detail="Board not found")
     if not board_member:
         raise HTTPException(status_code=403, detail="Access denied")
-    return board
+    return board_read(board, board_member.role)
 
 
 @router.patch("/boards/{board_id}", response_model=BoardRead)
@@ -81,7 +88,7 @@ async def update_board(board_id: UUID, payload: BoardUpdate, db: AsyncSession = 
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
     board_member = await db.scalar(select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id))
-    if not board_member:
+    if not board_member or board_member.role not in {"owner", "editor"}:
         raise HTTPException(status_code=403, detail="Access denied")
     if payload.name is not None:
         board.name = payload.name
@@ -91,7 +98,7 @@ async def update_board(board_id: UUID, payload: BoardUpdate, db: AsyncSession = 
     await db.refresh(board)
     # Clear live state when saved to DB
     await manager.clear_live_document(board_id)
-    return board
+    return board_read(board, board_member.role)
 
 
 @router.delete("/boards/{board_id}", status_code=204)
@@ -115,11 +122,17 @@ async def create_boilerplate(
     board_id: UUID,
     payload: BoilerplateCreate,
     db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
 ) -> dict:
     board = await db.get(Board, board_id)
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    return generate_boilerplate(board.name, payload.document or board.document)
+    board_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not board_member or board_member.role not in {"owner", "editor"}:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return generate_boilerplate(payload.name or board.name, payload.document or board.document)
 
 
 @router.post("/boards/{board_id}/boilerplate/download")
@@ -127,11 +140,20 @@ async def download_boilerplate(
     board_id: UUID,
     payload: BoilerplateCreate,
     db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
 ) -> StreamingResponse:
     board = await db.get(Board, board_id)
     if not board:
         raise HTTPException(status_code=404, detail="Board not found")
-    project_name, archive = create_boilerplate_zip(board.name, payload.document or board.document)
+    board_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not board_member:
+        raise HTTPException(status_code=403, detail="Access denied")
+    is_viewer = board_member.role == "viewer"
+    document = board.document if is_viewer else payload.document or board.document
+    project_name = board.name if is_viewer else payload.name or board.name
+    project_name, archive = create_boilerplate_zip(project_name, document)
     return StreamingResponse(
         archive,
         media_type="application/zip",
@@ -165,6 +187,77 @@ async def add_board_member(
     new_member = BoardMember(board_id=board_id, user_id=payload.user_id, role=payload.role)
     db.add(new_member)
     await db.commit()
+    await manager.broadcast(board_id, {"type": "members:changed"})
+    await manager.publish(board_id, {"type": "members:changed"})
+
+
+@router.get("/boards/{board_id}/members", response_model=list[BoardMemberRead])
+async def list_board_members(
+    board_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> list[BoardMemberRead]:
+    current_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not current_member:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    result = await db.execute(
+        select(BoardMember.user_id, User.username, BoardMember.role)
+        .join(User, User.id == BoardMember.user_id)
+        .where(BoardMember.board_id == board_id)
+        .order_by(User.username)
+    )
+    active_user_ids = {active_user["user_id"] for active_user in manager.active_users(board_id)}
+    return [
+        BoardMemberRead(
+            user_id=member_user_id,
+            username=username,
+            role=role,
+            is_active=str(member_user_id) in active_user_ids,
+        )
+        for member_user_id, username, role in result.all()
+    ]
+
+
+@router.delete("/boards/{board_id}/members/{member_user_id}", status_code=204)
+async def remove_board_member(
+    board_id: UUID,
+    member_user_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> None:
+    current_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not current_member or current_member.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the board owner can remove members")
+
+    target_member = await db.scalar(
+        select(BoardMember).where(
+            BoardMember.board_id == board_id,
+            BoardMember.user_id == member_user_id,
+        )
+    )
+    if not target_member:
+        raise HTTPException(status_code=404, detail="Board member not found")
+    if target_member.role == "owner":
+        raise HTTPException(status_code=400, detail="The board owner cannot be removed")
+
+    await db.delete(target_member)
+    await db.commit()
+
+    await manager.revoke_user(board_id, str(member_user_id))
+    await manager.broadcast(
+        board_id,
+        {"type": "presence", "event": "left", "user_id": str(member_user_id)},
+    )
+    await manager.broadcast(board_id, {"type": "members:changed"})
+    await manager.publish(
+        board_id,
+        {"type": "member:removed", "user_id": str(member_user_id)},
+    )
 
 
 
@@ -214,16 +307,18 @@ async def board_socket(
     # ------------------------------------------------
     # Only owner/editor can use the board
     # ------------------------------------------------
-    if board_member.role not in {"owner", "editor"}:
+    if board_member.role not in {"owner", "editor", "viewer"}:
         await websocket.close(code=1008)
         return
 
     # ------------------------------------------------
     # Authorization successful
     # ------------------------------------------------
-    await manager.connect(
+    active_users, is_new_presence = await manager.connect(
         board_id,
         websocket,
+        user.id,
+        user.username,
     )
 
     try:
@@ -255,17 +350,23 @@ async def board_socket(
             "document": live_document,
         })
 
+        await websocket.send_json({
+            "type": "presence:snapshot",
+            "users": active_users,
+        })
+
         # ------------------------------------------------
         # Tell existing users somebody joined
         # ------------------------------------------------
-        await manager.broadcast(
-            board_id,
-            {
+        if is_new_presence:
+            presence_message = {
                 "type": "presence",
                 "event": "joined",
-            },
-            sender=websocket,
-        )
+                "user_id": str(user.id),
+                "username": user.username,
+            }
+            await manager.broadcast(board_id, presence_message, sender=websocket)
+            await manager.publish(board_id, presence_message)
 
         # ------------------------------------------------
         # Handle messages
@@ -275,6 +376,13 @@ async def board_socket(
             message = await websocket.receive_json()
 
             event_type = message.get("type")
+
+            if board_member.role == "viewer":
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Viewers cannot send board events",
+                })
+                continue
 
             if event_type not in {
                 "document:update",
@@ -321,15 +429,16 @@ async def board_socket(
 
     except WebSocketDisconnect:
 
-        manager.disconnect(
+        user_left = manager.disconnect(
             board_id,
             websocket,
         )
 
-        await manager.broadcast(
-            board_id,
-            {
+        if user_left:
+            presence_message = {
                 "type": "presence",
                 "event": "left",
-            },
-        )
+                **user_left,
+            }
+            await manager.broadcast(board_id, presence_message)
+            await manager.publish(board_id, presence_message)

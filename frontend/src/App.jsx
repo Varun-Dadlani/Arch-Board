@@ -92,6 +92,7 @@ export default function App() {
   const [status, setStatus] = useState('Create a board to start collaborating.')
   const [boilerplate, setBoilerplate] = useState(null)
   const [boilerplateCollapsed, setBoilerplateCollapsed] = useState(false)
+  const [boardRole, setBoardRole] = useState(null)
   const [authUser, setAuthUser] = useState(null)
   const [authReady, setAuthReady] = useState(false)
   const [authMode, setAuthMode] = useState('login')
@@ -99,12 +100,17 @@ export default function App() {
   const [authError, setAuthError] = useState('')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark')
 
-  const [showMemberModal, setShowMemberModal] = useState(false)
+  const [members, setMembers] = useState([])
+  const [activeMemberIds, setActiveMemberIds] = useState(new Set())
   const [memberUserId, setMemberUserId] = useState('')
   const [memberRole, setMemberRole] = useState('editor')
   const [memberLoading, setMemberLoading] = useState(false)
+  const [membersLoading, setMembersLoading] = useState(false)
+  const [removingMemberId, setRemovingMemberId] = useState(null)
   const [memberError, setMemberError] = useState('')
   const [memberSuccess, setMemberSuccess] = useState('')
+  const isViewer = boardRole === 'viewer'
+  const isOwner = boardRole === 'owner'
 
   const socketRef = useRef(null)
   const documentRef = useRef(emptyDocument)
@@ -119,6 +125,12 @@ export default function App() {
     document.documentElement.dataset.theme = theme
     localStorage.setItem(THEME_KEY, theme)
   }, [theme])
+
+  useEffect(() => {
+    if (!memberSuccess) return undefined
+    const timeoutId = window.setTimeout(() => setMemberSuccess(''), 3000)
+    return () => window.clearTimeout(timeoutId)
+  }, [memberSuccess])
 
   useEffect(() => {
     documentRef.current = { nodes, edges }
@@ -138,7 +150,10 @@ export default function App() {
     localStorage.removeItem(TOKEN_KEY)
     setAuthUser(null)
     setBoard(null)
+    setBoardRole(null)
     setBoards([])
+    setMembers([])
+    setActiveMemberIds(new Set())
     setNodes([])
     setEdges([])
     setBoilerplate(null)
@@ -146,6 +161,31 @@ export default function App() {
     hydratedBoardRef.current = null
     setStatus('Signed out.')
   }, [setEdges, setNodes])
+
+  const loadMembers = useCallback(async boardId => {
+    if (!boardId) {
+      setMembers([])
+      setActiveMemberIds(new Set())
+      return
+    }
+
+    setMembersLoading(true)
+    try {
+      const response = await fetch(`${API_URL}/boards/${boardId}/members`, { headers: authHeaders() })
+      if (response.status === 401) {
+        logout()
+        return
+      }
+      if (!response.ok) throw new Error('Could not load board members')
+      setMembers(await response.json())
+      setMemberError('')
+    } catch (error) {
+      console.error('Could not load board members:', error)
+      setMemberError(error.message || 'Could not load board members.')
+    } finally {
+      setMembersLoading(false)
+    }
+  }, [logout])
 
   const submitAuth = async (event) => {
     event.preventDefault()
@@ -227,6 +267,7 @@ export default function App() {
         throw new Error(detail.detail || 'Could not add member.')
       }
 
+      await loadMembers(board.id)
       setMemberSuccess('Member added successfully.')
       setMemberUserId('')
     } catch (error) {
@@ -237,16 +278,44 @@ export default function App() {
     }
   }
 
-  const closeMemberModal = () => {
-    if (memberLoading) return
-    setShowMemberModal(false)
-    setMemberUserId('')
-    setMemberRole('editor')
+  const removeBoardMember = async member => {
+    if (!board || !isOwner || member.role === 'owner') return
+    if (!window.confirm(`Remove ${member.username} from this board?`)) return
+
+    setRemovingMemberId(member.user_id)
     setMemberError('')
     setMemberSuccess('')
+    try {
+      const response = await fetch(`${API_URL}/boards/${board.id}/members/${member.user_id}`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      })
+      if (response.status === 401) {
+        logout()
+        return
+      }
+      if (response.status === 403) throw new Error('Only the board owner can remove members.')
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Could not remove member.')
+      }
+      setMembers(current => current.filter(currentMember => currentMember.user_id !== member.user_id))
+      setActiveMemberIds(current => {
+        const next = new Set(current)
+        next.delete(member.user_id)
+        return next
+      })
+      setMemberSuccess(`${member.username} was removed.`)
+    } catch (error) {
+      console.error('Failed to remove board member:', error)
+      setMemberError(error.message || 'Could not remove member.')
+    } finally {
+      setRemovingMemberId(null)
+    }
   }
 
   const onConnect = useCallback((connection) => {
+    if (boardRole === 'viewer') return
     dirtyRef.current = true
     setEdges(current => {
       const next = addEdge({ ...connection, animated: true }, current)
@@ -256,9 +325,10 @@ export default function App() {
       })
       return next
     })
-  }, [setEdges])
+  }, [boardRole, setEdges])
 
   const handleNodesChange = useCallback((changes) => {
+    if (boardRole === 'viewer') return
     dirtyRef.current = true
     setNodes(current => {
       const next = applyNodeChanges(changes, current)
@@ -268,9 +338,10 @@ export default function App() {
       })
       return next
     })
-  }, [setNodes])
+  }, [boardRole, setNodes])
 
   const handleEdgesChange = useCallback((changes) => {
+    if (boardRole === 'viewer') return
     dirtyRef.current = true
     setEdges(current => {
       const next = applyEdgeChanges(changes, current)
@@ -280,7 +351,7 @@ export default function App() {
       })
       return next
     })
-  }, [setEdges])
+  }, [boardRole, setEdges])
 
   const loadBoards = useCallback(async () => {
     const requestId = ++boardListRequestRef.current
@@ -334,6 +405,7 @@ export default function App() {
       delete boardCacheRef.current[created.id]
 
       setBoard(created)
+      setBoardRole(created.member_role)
       setBoards(current => [created, ...current.filter(item => item.id !== created.id)])
       setNodes([])
       setEdges([])
@@ -371,12 +443,13 @@ export default function App() {
 
       const cachedDraft = boardCacheRef.current[boardId]
       const storedDraft = readStoredDraft(boardId)
-      const draft = cachedDraft || storedDraft
+      const draft = loadedBoard.member_role === 'viewer' ? null : cachedDraft || storedDraft
       const initialDocument = draft?.document || normalizeDocument(loadedBoard.document)
       const initialName = draft?.name ?? loadedBoard.name
 
       dirtyRef.current = Boolean(draft)
       setBoard(loadedBoard)
+      setBoardRole(loadedBoard.member_role)
       setBoilerplate(null)
       setName(initialName)
       setNodes(initialDocument.nodes)
@@ -473,6 +546,7 @@ export default function App() {
       }
 
       setBoard(null)
+      setBoardRole(null)
       setBoilerplate(null)
       setName('Untitled architecture')
       setNodes([])
@@ -494,7 +568,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/boards/${board.id}/boilerplate`, {
         method: 'POST',
         headers: authHeaders(true),
-        body: JSON.stringify({ document: documentRef.current }),
+        body: JSON.stringify({ name, document: documentRef.current }),
       })
 
       if (response.status === 401) {
@@ -516,13 +590,13 @@ export default function App() {
   }
 
   const downloadBoilerplate = async () => {
-    if (!boilerplate || !board) return
+    if (!board || (!boilerplate && !isViewer)) return
 
     try {
       const response = await fetch(`${API_URL}/boards/${board.id}/boilerplate/download`, {
         method: 'POST',
         headers: authHeaders(true),
-        body: JSON.stringify({ document: documentRef.current }),
+        body: JSON.stringify({ name, document: documentRef.current }),
       })
 
       if (response.status === 401) {
@@ -536,7 +610,7 @@ export default function App() {
       const url = URL.createObjectURL(blob)
       const link = document.createElement('a')
       link.href = url
-      link.download = `${boilerplate.project_name}-boilerplate.zip`
+      link.download = `${name.trim() || board.name}-boilerplate.zip`
       link.click()
       URL.revokeObjectURL(url)
     } catch (error) {
@@ -546,6 +620,7 @@ export default function App() {
   }
 
   const addNode = item => {
+    if (isViewer) return
     dirtyRef.current = true
     const next = makeNode(item, nodes.length)
 
@@ -598,7 +673,26 @@ export default function App() {
     socket.onmessage = event => {
       try {
         const message = JSON.parse(event.data)
-        if (message.type === 'presence') return
+
+        if (message.type === 'presence:snapshot') {
+          setActiveMemberIds(new Set(message.users.map(activeUser => activeUser.user_id)))
+          return
+        }
+
+        if (message.type === 'presence') {
+          setActiveMemberIds(current => {
+            const next = new Set(current)
+            if (message.event === 'joined') next.add(message.user_id)
+            if (message.event === 'left') next.delete(message.user_id)
+            return next
+          })
+          return
+        }
+
+        if (message.type === 'members:changed') {
+          loadMembers(boardId)
+          return
+        }
 
         if (message.type === 'document:load' && message.document) {
           const document = normalizeDocument(message.document)
@@ -628,7 +722,19 @@ export default function App() {
 
     socket.onclose = event => {
       console.log(`WebSocket disconnected for board ${boardId}`, event.code)
-      if (event.code === 1008) setStatus('You do not have access to this board.')
+      if (event.code === 1008) {
+        dirtyRef.current = false
+        hydratedBoardRef.current = null
+        setBoard(null)
+        setBoardRole(null)
+        setMembers([])
+        setActiveMemberIds(new Set())
+        setNodes([])
+        setEdges([])
+        documentRef.current = emptyDocument
+        window.history.replaceState({}, '', window.location.pathname)
+        setStatus('You do not have access to this board.')
+      }
       if (socketRef.current === socket) socketRef.current = null
     }
 
@@ -636,7 +742,7 @@ export default function App() {
       if (socketRef.current === socket) socketRef.current = null
       socket.close()
     }
-  }, [authReady, authUser, board, setEdges, setNodes])
+  }, [authReady, authUser, board, loadMembers, setEdges, setNodes])
 
   useEffect(() => {
     if (!authReady || !authUser) return
@@ -651,6 +757,15 @@ export default function App() {
     if (!authReady || !authUser) return
     loadBoards()
   }, [authReady, authUser, loadBoards])
+
+  useEffect(() => {
+    setActiveMemberIds(new Set())
+    if (!board) {
+      setMembers([])
+      return
+    }
+    loadMembers(board.id)
+  }, [board?.id, loadMembers])
 
   if (!authReady) {
     return (
@@ -740,6 +855,82 @@ export default function App() {
 
         <p className="subtitle">Design the system. Generate the starting point.</p>
 
+        {board && (
+          <section className="members-panel" aria-labelledby="members-heading">
+            <div className="members-panel-heading">
+              <h2 id="members-heading">Board members</h2>
+              <button className="members-refresh" onClick={() => loadMembers(board.id)} disabled={membersLoading}>
+                {membersLoading ? 'Loading' : 'Refresh'}
+              </button>
+            </div>
+            <p className="members-summary">
+              {members.length} {members.length === 1 ? 'member' : 'members'}
+              {activeMemberIds.size > 0 && ` · ${activeMemberIds.size} active`}
+            </p>
+
+            {members.length > 0 ? (
+              <ul className="member-list">
+                {members.map(member => {
+                  const isActive = activeMemberIds.has(member.user_id)
+                  return (
+                    <li className="member-row" key={member.user_id}>
+                      <span className="member-avatar" aria-hidden="true">{member.username.slice(0, 1).toUpperCase()}</span>
+                      <div className="member-details">
+                        <strong title={member.username}>{member.username}</strong>
+                        <span className="member-role">{member.role}</span>
+                        <span className="member-presence">
+                          <i className={isActive ? 'presence-dot is-active' : 'presence-dot'} />
+                          {isActive ? 'Active now' : 'Offline'}
+                        </span>
+                      </div>
+                      {isOwner && member.role !== 'owner' && (
+                        <button
+                          className="member-remove"
+                          onClick={() => removeBoardMember(member)}
+                          disabled={removingMemberId === member.user_id}
+                          aria-label={`Remove ${member.username}`}
+                          title={`Remove ${member.username}`}
+                        >
+                          {removingMemberId === member.user_id ? '...' : 'Remove'}
+                        </button>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+            ) : (
+              <p className="members-empty">{membersLoading ? 'Loading members...' : 'No members found.'}</p>
+            )}
+
+            {isOwner && (
+              <form
+                className="member-add-form"
+                onSubmit={event => { event.preventDefault(); addBoardMember() }}
+              >
+                <label htmlFor="member-user-id">Add a member</label>
+                <input
+                  id="member-user-id"
+                  value={memberUserId}
+                  onChange={event => { setMemberUserId(event.target.value); setMemberError(''); setMemberSuccess('') }}
+                  placeholder="User UUID"
+                  disabled={memberLoading}
+                  required
+                />
+                <select value={memberRole} onChange={event => setMemberRole(event.target.value)} disabled={memberLoading}>
+                  <option value="editor">Editor</option>
+                  <option value="viewer">Viewer</option>
+                </select>
+                <button className="primary" type="submit" disabled={memberLoading || !memberUserId.trim()}>
+                  {memberLoading ? 'Adding...' : 'Add member'}
+                </button>
+              </form>
+            )}
+
+            {memberError && <p className="member-feedback is-error">{memberError}</p>}
+            {memberSuccess && <p className="member-feedback is-success">{memberSuccess}</p>}
+          </section>
+        )}
+
         <div className="catalog-heading">
           <span>Component library</span>
           <small>{nodeCatalog.reduce((total, section) => total + section.items.length, 0)} components</small>
@@ -749,7 +940,7 @@ export default function App() {
           <section key={section.group}>
             <h2>{section.group}</h2>
             {section.items.map(item => (
-              <button className="node-button" key={item.technology} onClick={() => addNode(item)} disabled={!board}>
+              <button className="node-button" key={item.technology} onClick={() => addNode(item)} disabled={!board || isViewer}>
                 <span>{item.label}</span>
                 <small>{item.kind}</small>
               </button>
@@ -764,6 +955,7 @@ export default function App() {
             <span className="eyebrow">CURRENT BOARD</span>
             <input
               value={name}
+              readOnly={isViewer}
               onChange={event => { dirtyRef.current = true; setName(event.target.value) }}
               aria-label="Board name"
             />
@@ -807,71 +999,14 @@ export default function App() {
               ))}
             </select>
 
-            {board && <button className="secondary danger-button" onClick={deleteBoard}>Delete board</button>}
+            {board && isOwner && <button className="secondary danger-button" onClick={deleteBoard}>Delete board</button>}
             {!board && <button className="primary" onClick={createBoard}>+ Create board</button>}
 
-            {board && (
-              <button
-                className="secondary"
-                onClick={() => { setMemberError(''); setMemberSuccess(''); setShowMemberModal(true) }}
-              >
-                Add members
-              </button>
-            )}
-
-            {board && <button className="secondary" onClick={createBoilerplate}>Generate code</button>}
-            {board && <button className="primary" onClick={saveBoard}>Save changes</button>}
+            {board && !isViewer && <button className="secondary" onClick={createBoilerplate}>Generate code</button>}
+            {board && isViewer && <button className="secondary" onClick={downloadBoilerplate}>Download boilerplate</button>}
+            {board && !isViewer && <button className="primary" onClick={saveBoard}>Save changes</button>}
           </div>
         </header>
-
-        {showMemberModal && (
-          <div
-            className="member-modal-overlay"
-            onMouseDown={event => { if (event.target === event.currentTarget) closeMemberModal() }}
-          >
-            <section className="member-modal" role="dialog" aria-modal="true" aria-labelledby="member-modal-title">
-              <div className="member-modal-header">
-                <div>
-                  <span className="eyebrow">BOARD ACCESS</span>
-                  <h2 id="member-modal-title">Add members</h2>
-                  <p>Add a user to <strong>{board?.name}</strong>.</p>
-                </div>
-                <button className="modal-close" onClick={closeMemberModal} disabled={memberLoading} aria-label="Close">×</button>
-              </div>
-
-              <div className="member-form">
-                <label>
-                  User ID
-                  <input
-                    value={memberUserId}
-                    onChange={event => { setMemberUserId(event.target.value); setMemberError(''); setMemberSuccess('') }}
-                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                    disabled={memberLoading}
-                    autoFocus
-                  />
-                  <small>Enter the user's UUID.</small>
-                </label>
-
-                <label>
-                  Role
-                  <select value={memberRole} onChange={event => setMemberRole(event.target.value)} disabled={memberLoading}>
-                    <option value="editor">Editor</option>
-                  </select>
-                </label>
-
-                {memberError && <div className="member-error">{memberError}</div>}
-                {memberSuccess && <div className="member-success">{memberSuccess}</div>}
-
-                <div className="member-modal-actions">
-                  <button className="primary" onClick={addBoardMember} disabled={memberLoading || !memberUserId.trim()}>
-                    {memberLoading ? 'Adding...' : 'Add member'}
-                  </button>
-                  <button className="secondary" onClick={closeMemberModal} disabled={memberLoading}>Close</button>
-                </div>
-              </div>
-            </section>
-          </div>
-        )}
 
         <div className="canvas-wrap">
           <ReactFlow
@@ -880,6 +1015,9 @@ export default function App() {
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
+            nodesDraggable={!isViewer}
+            nodesConnectable={!isViewer}
+            elementsSelectable={!isViewer}
             fitView
           >
             <Background gap={20} size={1} />

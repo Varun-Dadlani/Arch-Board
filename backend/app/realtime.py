@@ -11,6 +11,7 @@ from redis.asyncio import Redis
 class ConnectionManager:
     def __init__(self, redis: Redis) -> None:
         self.rooms: dict[UUID, set[WebSocket]] = defaultdict(set)
+        self.connection_users: dict[UUID, dict[WebSocket, dict[str, str]]] = defaultdict(dict)
 
         # Redis is now the shared live-document store
         self.redis = redis
@@ -67,32 +68,76 @@ class ConnectionManager:
         self,
         board_id: UUID,
         websocket: WebSocket,
-    ) -> None:
+        user_id: UUID,
+        username: str,
+    ) -> tuple[list[dict[str, str]], bool]:
         await websocket.accept()
 
         was_empty = not self.rooms[board_id]
+        was_user_online = any(
+            connection_user["user_id"] == str(user_id)
+            for connection_user in self.connection_users[board_id].values()
+        )
 
         self.rooms[board_id].add(websocket)
+        self.connection_users[board_id][websocket] = {
+            "user_id": str(user_id),
+            "username": username,
+        }
 
         if was_empty:
             self.subscriber_tasks[board_id] = asyncio.create_task(
                 self.subscribe_to_board(board_id)
             )
 
+        return self.active_users(board_id), not was_user_online
+
+    def active_users(self, board_id: UUID) -> list[dict[str, str]]:
+        users: dict[str, dict[str, str]] = {}
+        for connection_user in self.connection_users.get(board_id, {}).values():
+            users[connection_user["user_id"]] = connection_user
+        return list(users.values())
+
     def disconnect(
         self,
         board_id: UUID,
         websocket: WebSocket,
-    ) -> None:
+    ) -> dict[str, str] | None:
+        connection_user = self.connection_users.get(board_id, {}).pop(websocket, None)
         self.rooms[board_id].discard(websocket)
+        user_left = connection_user and not any(
+            active_user["user_id"] == connection_user["user_id"]
+            for active_user in self.connection_users.get(board_id, {}).values()
+        )
 
         if not self.rooms[board_id]:
             self.rooms.pop(board_id, None)
+            self.connection_users.pop(board_id, None)
 
             task = self.subscriber_tasks.pop(board_id, None)
 
             if task:
-                task.cancel()
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        return connection_user if user_left else None
+
+    async def revoke_user(self, board_id: UUID, user_id: str) -> dict[str, str] | None:
+        connections = [
+            websocket
+            for websocket, connection_user in self.connection_users.get(board_id, {}).items()
+            if connection_user["user_id"] == user_id
+        ]
+        user_left = None
+
+        for websocket in connections:
+            try:
+                await websocket.close(code=1008, reason="Board access was removed")
+            except Exception:
+                pass
+            user_left = self.disconnect(board_id, websocket) or user_left
+
+        return user_left
 
     async def broadcast(
         self,
@@ -163,6 +208,22 @@ class ConnectionManager:
                     continue
 
                 message = payload["message"]
+
+                if message.get("type") == "member:removed":
+                    removed_user = await self.revoke_user(board_id, message["user_id"])
+                    await self.broadcast(
+                        board_id,
+                        {
+                            "type": "presence",
+                            "event": "left",
+                            "user_id": message["user_id"],
+                            "username": removed_user["username"] if removed_user else "",
+                        },
+                    )
+                    await self.broadcast(board_id, {"type": "members:changed"})
+                    if not self.rooms.get(board_id):
+                        return
+                    continue
 
                 await self.broadcast(
                     board_id,
