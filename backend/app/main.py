@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_settings
 from app.database import engine
 from app.models.base import Base
-from app.models import boards, users
+from app.models import boards, chat_messages, users
 from app.routes import auth, boards as board_routes
 
 

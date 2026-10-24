@@ -46,6 +46,14 @@ function normalizeDocument(document) {
   }
 }
 
+function mergeChatMessages(current, incoming) {
+  const messagesById = new Map(current.map(message => [message.id, message]))
+  incoming.forEach(message => messagesById.set(message.id, message))
+  return [...messagesById.values()].sort((left, right) =>
+    new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  )
+}
+
 function sendSocketMessage(socketRef, message) {
   if (socketRef.current?.readyState === WebSocket.OPEN) {
     socketRef.current.send(JSON.stringify(message))
@@ -88,7 +96,12 @@ export default function App() {
   const [boards, setBoards] = useState([])
   const [nodes, setNodes] = useNodesState([])
   const [edges, setEdges] = useEdgesState([])
-  const [name, setName] = useState('Untitled architecture')
+  const [name, setName] = useState('')
+  const [isCreateBoardOpen, setIsCreateBoardOpen] = useState(false)
+  const [createBoardName, setCreateBoardName] = useState('')
+  const [createBoardError, setCreateBoardError] = useState('')
+  const [isCreatingBoard, setIsCreatingBoard] = useState(false)
+  const [isEmptyBoardDialogOpen, setIsEmptyBoardDialogOpen] = useState(false)
   const [status, setStatus] = useState('Create a board to start collaborating.')
   const [boilerplate, setBoilerplate] = useState(null)
   const [boilerplateCollapsed, setBoilerplateCollapsed] = useState(false)
@@ -107,10 +120,23 @@ export default function App() {
   const [memberLoading, setMemberLoading] = useState(false)
   const [membersLoading, setMembersLoading] = useState(false)
   const [removingMemberId, setRemovingMemberId] = useState(null)
+  const [memberMenuUserId, setMemberMenuUserId] = useState(null)
+  const [memberMenuPosition, setMemberMenuPosition] = useState(null)
+  const [editingMemberRoleId, setEditingMemberRoleId] = useState(null)
+  const [selectedMemberRole, setSelectedMemberRole] = useState('editor')
+  const [updatingMemberRoleId, setUpdatingMemberRoleId] = useState(null)
   const [memberError, setMemberError] = useState('')
   const [memberSuccess, setMemberSuccess] = useState('')
+  const [isChatOpen, setIsChatOpen] = useState(false)
+  const [chatMessages, setChatMessages] = useState([])
+  const [chatDraft, setChatDraft] = useState('')
+  const [isChatLoading, setIsChatLoading] = useState(false)
+  const [isChatSending, setIsChatSending] = useState(false)
+  const [chatError, setChatError] = useState('')
+  const [chatReloadKey, setChatReloadKey] = useState(0)
   const isViewer = boardRole === 'viewer'
   const isOwner = boardRole === 'owner'
+  const editingMember = members.find(member => member.user_id === editingMemberRoleId)
 
   const socketRef = useRef(null)
   const documentRef = useRef(emptyDocument)
@@ -120,6 +146,7 @@ export default function App() {
   const boardLoadRef = useRef(0)
   const hydratedBoardRef = useRef(null)
   const dirtyRef = useRef(false)
+  const chatMessagesEndRef = useRef(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -131,6 +158,19 @@ export default function App() {
     const timeoutId = window.setTimeout(() => setMemberSuccess(''), 3000)
     return () => window.clearTimeout(timeoutId)
   }, [memberSuccess])
+
+  useEffect(() => {
+    setIsChatOpen(false)
+    setChatMessages([])
+    setChatDraft('')
+    setChatError('')
+    setChatReloadKey(0)
+  }, [board?.id])
+
+  useEffect(() => {
+    if (!isChatOpen) return
+    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [chatMessages, isChatOpen])
 
   useEffect(() => {
     documentRef.current = { nodes, edges }
@@ -151,9 +191,13 @@ export default function App() {
     setAuthUser(null)
     setBoard(null)
     setBoardRole(null)
+    setIsCreateBoardOpen(false)
     setBoards([])
     setMembers([])
     setActiveMemberIds(new Set())
+    setIsChatOpen(false)
+    setChatMessages([])
+    setChatError('')
     setNodes([])
     setEdges([])
     setBoilerplate(null)
@@ -186,6 +230,44 @@ export default function App() {
       setMembersLoading(false)
     }
   }, [logout])
+
+  useEffect(() => {
+    const activeBoardId = board?.id
+    if (!isChatOpen || !activeBoardId) return undefined
+
+    const controller = new AbortController()
+    setIsChatLoading(true)
+    setChatError('')
+
+    fetch(`${API_URL}/boards/${activeBoardId}/chat`, {
+      headers: authHeaders(),
+      signal: controller.signal,
+    })
+      .then(async response => {
+        if (response.status === 401) {
+          logout()
+          return null
+        }
+        if (!response.ok) {
+          const detail = await response.json().catch(() => ({}))
+          throw new Error(detail.detail || 'Could not load chat history.')
+        }
+        return response.json()
+      })
+      .then(messages => {
+        if (messages) setChatMessages(current => mergeChatMessages(current, messages))
+      })
+      .catch(error => {
+        if (error.name === 'AbortError') return
+        console.error('Could not load board chat:', error)
+        setChatError(error.message || 'Could not load chat history.')
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setIsChatLoading(false)
+      })
+
+    return () => controller.abort()
+  }, [isChatOpen, board?.id, chatReloadKey, logout])
 
   const submitAuth = async (event) => {
     event.preventDefault()
@@ -282,6 +364,8 @@ export default function App() {
     if (!board || !isOwner || member.role === 'owner') return
     if (!window.confirm(`Remove ${member.username} from this board?`)) return
 
+    setMemberMenuUserId(null)
+    setEditingMemberRoleId(null)
     setRemovingMemberId(member.user_id)
     setMemberError('')
     setMemberSuccess('')
@@ -311,6 +395,81 @@ export default function App() {
       setMemberError(error.message || 'Could not remove member.')
     } finally {
       setRemovingMemberId(null)
+    }
+  }
+
+  const updateBoardMemberRole = async member => {
+    if (!board || !isOwner || member.role === 'owner') return
+    if (selectedMemberRole === member.role) {
+      setMemberMenuUserId(null)
+      setEditingMemberRoleId(null)
+      return
+    }
+
+    setUpdatingMemberRoleId(member.user_id)
+    setMemberError('')
+    setMemberSuccess('')
+    try {
+      const response = await fetch(`${API_URL}/boards/${board.id}/members/${member.user_id}`, {
+        method: 'PATCH',
+        headers: authHeaders(true),
+        body: JSON.stringify({ role: selectedMemberRole }),
+      })
+      if (response.status === 401) {
+        logout()
+        return
+      }
+      if (response.status === 403) throw new Error('Only the board owner can change member roles.')
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Could not change member role.')
+      }
+
+      setMembers(current => current.map(currentMember =>
+        currentMember.user_id === member.user_id
+          ? { ...currentMember, role: selectedMemberRole }
+          : currentMember
+      ))
+      setMemberMenuUserId(null)
+      setEditingMemberRoleId(null)
+      setMemberSuccess(`${member.username}'s role changed to ${selectedMemberRole}.`)
+    } catch (error) {
+      console.error('Failed to update board member role:', error)
+      setMemberError(error.message || 'Could not change member role.')
+    } finally {
+      setUpdatingMemberRoleId(null)
+    }
+  }
+
+  const sendChatMessage = async event => {
+    event.preventDefault()
+    if (!board || !chatDraft.trim() || isChatSending) return
+
+    setIsChatSending(true)
+    setChatError('')
+    try {
+      const response = await fetch(`${API_URL}/boards/${board.id}/chat`, {
+        method: 'POST',
+        headers: authHeaders(true),
+        body: JSON.stringify({ content: chatDraft.trim() }),
+      })
+      if (response.status === 401) {
+        logout()
+        return
+      }
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}))
+        throw new Error(detail.detail || 'Could not send message.')
+      }
+
+      const message = await response.json()
+      setChatMessages(current => mergeChatMessages(current, [message]))
+      setChatDraft('')
+    } catch (error) {
+      console.error('Could not send board chat message:', error)
+      setChatError(error.message || 'Could not send message.')
+    } finally {
+      setIsChatSending(false)
     }
   }
 
@@ -383,10 +542,23 @@ export default function App() {
     }
   }, [logout])
 
-  const createBoard = async () => {
+  const openCreateBoard = () => {
+    setCreateBoardName('')
+    setCreateBoardError('')
+    setIsCreateBoardOpen(true)
+  }
+
+  const createBoard = async boardName => {
+    const freshBoardName = boardName.trim()
+    if (!freshBoardName) {
+      setCreateBoardError('Please enter a board name.')
+      return
+    }
+
+    setIsCreatingBoard(true)
+    setCreateBoardError('')
     try {
       dirtyRef.current = false
-      const freshBoardName = 'Untitled architecture'
       const response = await fetch(`${API_URL}/boards`, {
         method: 'POST',
         headers: authHeaders(true),
@@ -415,10 +587,13 @@ export default function App() {
       setBoilerplateCollapsed(false)
       hydratedBoardRef.current = created.id
       window.history.replaceState({}, '', `?board=${created.id}`)
+      setIsCreateBoardOpen(false)
       setStatus('Board created. Live collaboration connected.')
     } catch (error) {
       console.error('Could not create board:', error)
-      setStatus(error.message || 'Could not create a new board.')
+      setCreateBoardError(error.message || 'Could not create a new board.')
+    } finally {
+      setIsCreatingBoard(false)
     }
   }
 
@@ -548,7 +723,7 @@ export default function App() {
       setBoard(null)
       setBoardRole(null)
       setBoilerplate(null)
-      setName('Untitled architecture')
+      setName('')
       setNodes([])
       setEdges([])
       documentRef.current = emptyDocument
@@ -562,7 +737,10 @@ export default function App() {
   }
 
   const createBoilerplate = async () => {
-    if (!board) return
+    if (!board || documentRef.current.nodes.length === 0) {
+      setIsEmptyBoardDialogOpen(true)
+      return
+    }
 
     try {
       const response = await fetch(`${API_URL}/boards/${board.id}/boilerplate`, {
@@ -691,6 +869,16 @@ export default function App() {
 
         if (message.type === 'members:changed') {
           loadMembers(boardId)
+          return
+        }
+
+        if (message.type === 'chat:message' && message.message) {
+          setChatMessages(current => mergeChatMessages(current, [message.message]))
+          return
+        }
+
+        if (message.type === 'member:role_changed' && message.user_id === authUser.id) {
+          openBoard(boardId)
           return
         }
 
@@ -884,15 +1072,58 @@ export default function App() {
                         </span>
                       </div>
                       {isOwner && member.role !== 'owner' && (
-                        <button
-                          className="member-remove"
-                          onClick={() => removeBoardMember(member)}
-                          disabled={removingMemberId === member.user_id}
-                          aria-label={`Remove ${member.username}`}
-                          title={`Remove ${member.username}`}
-                        >
-                          {removingMemberId === member.user_id ? '...' : 'Remove'}
-                        </button>
+                        <div className="member-actions">
+                          <button
+                            className="member-menu-trigger"
+                            type="button"
+                            onClick={event => {
+                              if (memberMenuUserId === member.user_id) {
+                                setMemberMenuUserId(null)
+                                setMemberMenuPosition(null)
+                                return
+                              }
+                              const bounds = event.currentTarget.getBoundingClientRect()
+                              setMemberMenuPosition({
+                                top: Math.min(bounds.bottom + 4, window.innerHeight - 88),
+                                right: Math.max(8, window.innerWidth - bounds.right),
+                              })
+                              setMemberMenuUserId(member.user_id)
+                            }}
+                            disabled={removingMemberId === member.user_id || updatingMemberRoleId === member.user_id}
+                            aria-label={`Actions for ${member.username}`}
+                            aria-expanded={memberMenuUserId === member.user_id}
+                            title={`Actions for ${member.username}`}
+                          >
+                            ···
+                          </button>
+                          {memberMenuUserId === member.user_id && (
+                            <div
+                              className="member-action-menu"
+                              style={{ top: memberMenuPosition?.top, right: memberMenuPosition?.right }}
+                            >
+                              <button
+                                className="member-action-option"
+                                type="button"
+                                onClick={() => {
+                                  setSelectedMemberRole(member.role)
+                                  setMemberMenuUserId(null)
+                                  setMemberMenuPosition(null)
+                                  setEditingMemberRoleId(member.user_id)
+                                }}
+                              >
+                                Change role
+                              </button>
+                              <button
+                                className="member-action-option is-danger"
+                                type="button"
+                                onClick={() => removeBoardMember(member)}
+                                disabled={removingMemberId === member.user_id}
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </li>
                   )
@@ -951,15 +1182,17 @@ export default function App() {
 
       <section className="workspace">
         <header className="topbar">
-          <div className="board-title">
-            <span className="eyebrow">CURRENT BOARD</span>
-            <input
-              value={name}
-              readOnly={isViewer}
-              onChange={event => { dirtyRef.current = true; setName(event.target.value) }}
-              aria-label="Board name"
-            />
-          </div>
+          {board && (
+            <div className="board-title">
+              <span className="eyebrow">CURRENT BOARD</span>
+              <input
+                value={name}
+                readOnly={isViewer}
+                onChange={event => { dirtyRef.current = true; setName(event.target.value) }}
+                aria-label="Board name"
+              />
+            </div>
+          )}
 
           <div className="actions">
             <div className="account-chip">
@@ -982,25 +1215,38 @@ export default function App() {
 
             <select
               className="board-picker"
-              value={board?.id || 'new-board'}
+              value={board?.id || ''}
               onChange={event => {
                 const nextSelection = event.target.value
                 if (nextSelection === 'new-board') {
-                  createBoard()
+                  openCreateBoard()
                   return
                 }
                 handleBoardSelection(nextSelection)
               }}
               aria-label="Select a board or create a new one"
             >
+              <option value="" disabled>Select a board</option>
               <option value="new-board">+ New board</option>
               {boards.map(savedBoard => (
                 <option key={savedBoard.id} value={savedBoard.id}>{savedBoard.name}</option>
               ))}
             </select>
 
+            {board && (
+              <button
+                className={`secondary chat-toggle ${isChatOpen ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => setIsChatOpen(open => !open)}
+                aria-expanded={isChatOpen}
+                aria-controls="board-chat-panel"
+              >
+                <span aria-hidden="true">▱</span>
+                Group chat
+              </button>
+            )}
+
             {board && isOwner && <button className="secondary danger-button" onClick={deleteBoard}>Delete board</button>}
-            {!board && <button className="primary" onClick={createBoard}>+ Create board</button>}
 
             {board && !isViewer && <button className="secondary" onClick={createBoilerplate}>Generate code</button>}
             {board && isViewer && <button className="secondary" onClick={downloadBoilerplate}>Download boilerplate</button>}
@@ -1026,10 +1272,12 @@ export default function App() {
 
           {!board && (
             <div className="canvas-empty">
-              <div className="empty-icon">+</div>
               <h1>Start with a new board</h1>
               <p>Create a board to begin mapping your system architecture.</p>
-              <button className="primary" onClick={createBoard}>Create your first board</button>
+              <button className="primary empty-create-button" onClick={openCreateBoard}>
+                <span className="empty-icon" aria-hidden="true">+</span>
+                <span>Create a new board</span>
+              </button>
             </div>
           )}
         </div>
@@ -1069,7 +1317,247 @@ export default function App() {
           <span className={board ? 'online-dot' : 'offline-dot'} />
           {status}
         </footer>
+
+        {board && isChatOpen && (
+          <section
+            className="chat-panel"
+            id="board-chat-panel"
+            role="dialog"
+            aria-label={`${board.name} group chat`}
+          >
+            <header className="chat-header">
+              <div>
+                <span className="chat-eyebrow">BOARD CONVERSATION</span>
+                <h2>Group chat</h2>
+                <p>{board.name} · {members.length} {members.length === 1 ? 'member' : 'members'}</p>
+              </div>
+              <button
+                className="chat-close"
+                type="button"
+                onClick={() => setIsChatOpen(false)}
+                aria-label="Close group chat"
+              >
+                ×
+              </button>
+            </header>
+
+            <div className="chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+              {isChatLoading && chatMessages.length === 0 && (
+                <p className="chat-state">Loading conversation...</p>
+              )}
+              {chatError && (
+                <div className="chat-load-error" role="alert">
+                  <span>{chatError}</span>
+                  <button type="button" onClick={() => setChatReloadKey(current => current + 1)}>
+                    Retry
+                  </button>
+                </div>
+              )}
+              {!isChatLoading && !chatError && chatMessages.length === 0 && (
+                <div className="chat-empty">
+                  <span aria-hidden="true">✦</span>
+                  <strong>Start the conversation</strong>
+                  <p>Messages here are shared with everyone on this board.</p>
+                </div>
+              )}
+              {chatMessages.map(message => {
+                const isOwnMessage = message.user_id === authUser.id
+                return (
+                  <article
+                    className={`chat-message ${isOwnMessage ? 'is-own-message' : ''}`}
+                    key={message.id}
+                  >
+                    {!isOwnMessage && (
+                      <span className="chat-message-avatar" aria-hidden="true">
+                        {message.username.slice(0, 1).toUpperCase()}
+                      </span>
+                    )}
+                    <div className="chat-message-content">
+                      <div className="chat-message-meta">
+                        <strong>{isOwnMessage ? 'You' : message.username}</strong>
+                        <time dateTime={message.created_at}>
+                          {new Date(message.created_at).toLocaleTimeString([], {
+                            hour: 'numeric',
+                            minute: '2-digit',
+                          })}
+                        </time>
+                      </div>
+                      <p>{message.content}</p>
+                    </div>
+                  </article>
+                )
+              })}
+              <div ref={chatMessagesEndRef} />
+            </div>
+
+            <form className="chat-composer" onSubmit={sendChatMessage}>
+              <label className="visually-hidden" htmlFor="chat-message-input">Write a message</label>
+              <textarea
+                id="chat-message-input"
+                value={chatDraft}
+                onChange={event => {
+                  setChatDraft(event.target.value)
+                  if (chatError) setChatError('')
+                }}
+                onKeyDown={event => {
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    event.currentTarget.form.requestSubmit()
+                  }
+                }}
+                placeholder="Message board members..."
+                maxLength={2000}
+                rows={2}
+                disabled={isChatSending}
+              />
+              <button
+                className="primary chat-send"
+                type="submit"
+                disabled={isChatSending || !chatDraft.trim()}
+                aria-label="Send message"
+              >
+                {isChatSending ? 'Sending...' : 'Send'}
+              </button>
+            </form>
+            <p className="chat-hint">Enter to send · Shift + Enter for a new line</p>
+          </section>
+        )}
       </section>
+
+      {isCreateBoardOpen && (
+        <div className="create-board-backdrop">
+          <section
+            className="create-board-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-board-title"
+          >
+            <h2 id="create-board-title">Create a new board</h2>
+            <p>Choose a name for your architecture board.</p>
+            <form onSubmit={event => { event.preventDefault(); createBoard(createBoardName) }}>
+              <label htmlFor="create-board-name">Board name</label>
+              <input
+                id="create-board-name"
+                autoFocus
+                maxLength={160}
+                value={createBoardName}
+                onChange={event => { setCreateBoardName(event.target.value); setCreateBoardError('') }}
+                placeholder="e.g. Customer platform"
+                disabled={isCreatingBoard}
+                required
+              />
+              {createBoardError && <p className="create-board-error" role="alert">{createBoardError}</p>}
+              <div className="create-board-actions">
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => setIsCreateBoardOpen(false)}
+                  disabled={isCreatingBoard}
+                >
+                  Cancel
+                </button>
+                <button className="primary" type="submit" disabled={isCreatingBoard}>
+                  {isCreatingBoard ? 'Creating...' : 'Create board'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
+
+      {isEmptyBoardDialogOpen && (
+        <div className="create-board-backdrop">
+          <section
+            className="create-board-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="empty-board-title"
+            aria-describedby="empty-board-message"
+          >
+            <h2 id="empty-board-title">Board is empty</h2>
+            <p id="empty-board-message">Add at least one component to this board before generating boilerplate.</p>
+            <div className="create-board-actions">
+              <button
+                className="primary"
+                type="button"
+                autoFocus
+                onClick={() => setIsEmptyBoardDialogOpen(false)}
+              >
+                Got it
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
+
+      {editingMember && (
+        <div
+          className="member-modal-overlay"
+          onMouseDown={event => {
+            if (event.target === event.currentTarget && updatingMemberRoleId !== editingMember.user_id) {
+              setEditingMemberRoleId(null)
+            }
+          }}
+        >
+          <section
+            className="member-modal member-role-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="change-member-role-title"
+          >
+            <div className="member-modal-header">
+              <div>
+                <span className="eyebrow">BOARD ACCESS</span>
+                <h2 id="change-member-role-title">Change member role</h2>
+                <p>Update access for <strong>{editingMember.username}</strong>.</p>
+              </div>
+              <button
+                className="modal-close"
+                type="button"
+                onClick={() => setEditingMemberRoleId(null)}
+                disabled={updatingMemberRoleId === editingMember.user_id}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            <form
+              className="member-form"
+              onSubmit={event => {
+                event.preventDefault()
+                updateBoardMemberRole(editingMember)
+              }}
+            >
+              <label htmlFor="change-member-role">
+                Role
+                <select
+                  id="change-member-role"
+                  value={selectedMemberRole}
+                  onChange={event => setSelectedMemberRole(event.target.value)}
+                  disabled={updatingMemberRoleId === editingMember.user_id}
+                >
+                  <option value="editor">Editor — can edit the board</option>
+                  <option value="viewer">Viewer — can view the board</option>
+                </select>
+              </label>
+              {memberError && <p className="member-error" role="alert">{memberError}</p>}
+              <div className="member-modal-actions">
+                <button
+                  className="secondary"
+                  type="button"
+                  onClick={() => setEditingMemberRoleId(null)}
+                  disabled={updatingMemberRoleId === editingMember.user_id}
+                >
+                  Cancel
+                </button>
+                <button className="primary" type="submit" disabled={updatingMemberRoleId === editingMember.user_id}>
+                  {updatingMemberRoleId === editingMember.user_id ? 'Saving...' : 'Save role'}
+                </button>
+              </div>
+            </form>
+          </section>
+        </div>
+      )}
     </main>
   )
 }

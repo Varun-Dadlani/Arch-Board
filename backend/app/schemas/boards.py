@@ -39,9 +39,24 @@ class BoardMemberAdd(BaseModel):
     user_id: UUID
     role: Literal["editor", "viewer"] = "editor"
 
+class BoardMemberRoleUpdate(BaseModel):
+    role: Literal["editor", "viewer"]
+
 
 class BoardMemberRead(BaseModel):
     user_id: UUID
     username: str
     role: str
     is_active: bool
+
+
+class ChatMessageCreate(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+
+
+class ChatMessageRead(BaseModel):
+    id: UUID
+    user_id: UUID
+    username: str
+    content: str
+    created_at: datetime

@@ -19,6 +19,7 @@ ARCH-BOARD helps developer teams sketch a basic system architecture using a drag
 - The backend maintains a live in-memory document for active boards.
 - When a user joins or rejoins a board, the latest live document is sent immediately.
 - A user's stale local state is not pushed automatically on reconnect, preventing an old client from overwriting another user's newer changes.
+- Board members can use a real-time group chat; messages are saved in PostgreSQL and the latest 100 messages load when chat opens.
 
 ### 💾 Board Management
 - Create new architecture boards.
@@ -56,7 +57,8 @@ ARCH-BOARD helps developer teams sketch a basic system architecture using a drag
           │                  │            │                  │
           │ Board CRUD       │            │ Rooms            │
           │ Authentication   │            │ Live documents   │
-          │ Boilerplate      │            │ Broadcasts       │
+          │ Boilerplate      │            │ Chat broadcasts  │
+          │ Board chat       │            │                  │
           └────────┬─────────┘            └────────┬─────────┘
                    │                               │
                    ▼                               ▼
@@ -65,6 +67,7 @@ ARCH-BOARD helps developer teams sketch a basic system architecture using a drag
           │                  │            │                  │
           │ Saved boards     │            │ User A           │
           │ JSON documents   │            │ User B           │
+          │ Chat messages    │            │                  │
           └──────────────────┘            └──────────────────┘
 ```
 

@@ -9,12 +9,25 @@ from app.database import SessionLocal,get_db
 from app.boilerplate import create_boilerplate_zip, generate_boilerplate
 from app.models.boards import Board
 from app.models.board_members import BoardMember
+from app.models.chat_messages import ChatMessage
 from app.models.users import User
 from app.realtime import manager
-from app.schemas.boards import BoardCreate, BoardMemberAdd, BoardMemberRead, BoardRead, BoardUpdate, BoilerplateCreate, BoilerplateRead
+from app.schemas.boards import (
+    BoardCreate,
+    BoardMemberAdd,
+    BoardMemberRead,
+    BoardMemberRoleUpdate,
+    BoardRead,
+    BoardUpdate,
+    ChatMessageCreate,
+    ChatMessageRead,
+    BoilerplateCreate,
+    BoilerplateRead,
+)
 from app.core.dependencies import get_current_user, get_current_user_ws
 
 router = APIRouter(tags=["boards"])
+CHAT_HISTORY_LIMIT = 100
 
 
 def board_read(board: Board, member_role: str) -> BoardRead:
@@ -219,6 +232,112 @@ async def list_board_members(
         )
         for member_user_id, username, role in result.all()
     ]
+
+
+@router.patch("/boards/{board_id}/members/{member_user_id}", status_code=204)
+async def update_board_member_role(
+    board_id: UUID,
+    member_user_id: UUID,
+    payload: BoardMemberRoleUpdate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> None:
+    current_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not current_member or current_member.role != "owner":
+        raise HTTPException(status_code=403, detail="Only the board owner can change member roles")
+
+    target_member = await db.scalar(
+        select(BoardMember).where(
+            BoardMember.board_id == board_id,
+            BoardMember.user_id == member_user_id,
+        )
+    )
+    if not target_member:
+        raise HTTPException(status_code=404, detail="Board member not found")
+    if target_member.role == "owner":
+        raise HTTPException(status_code=400, detail="The board owner's role cannot be changed")
+
+    target_member.role = payload.role
+    await db.commit()
+    await manager.broadcast(
+        board_id,
+        {"type": "member:role_changed", "user_id": str(member_user_id)},
+    )
+    await manager.broadcast(board_id, {"type": "members:changed"})
+    await manager.publish(
+        board_id,
+        {"type": "member:role_changed", "user_id": str(member_user_id)},
+    )
+    await manager.publish(board_id, {"type": "members:changed"})
+
+
+@router.get("/boards/{board_id}/chat", response_model=list[ChatMessageRead])
+async def list_board_chat(
+    board_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> list[ChatMessageRead]:
+    board_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not board_member:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    result = await db.execute(
+        select(ChatMessage.id, ChatMessage.user_id, User.username, ChatMessage.content, ChatMessage.created_at)
+        .join(User, User.id == ChatMessage.user_id)
+        .where(ChatMessage.board_id == board_id)
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+        .limit(CHAT_HISTORY_LIMIT)
+    )
+    messages = [
+        ChatMessageRead(
+            id=message_id,
+            user_id=user_id,
+            username=username,
+            content=content,
+            created_at=created_at,
+        )
+        for message_id, user_id, username, content, created_at in result.all()
+    ]
+    return list(reversed(messages))
+
+
+@router.post("/boards/{board_id}/chat", response_model=ChatMessageRead, status_code=201)
+async def create_board_chat_message(
+    board_id: UUID,
+    payload: ChatMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    user=Depends(get_current_user),
+) -> ChatMessageRead:
+    board_member = await db.scalar(
+        select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == user.id)
+    )
+    if not board_member:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=422, detail="Message cannot be empty")
+
+    chat_message = ChatMessage(board_id=board_id, user_id=user.id, content=content)
+    db.add(chat_message)
+    await db.commit()
+    await db.refresh(chat_message)
+
+    message = ChatMessageRead(
+        id=chat_message.id,
+        user_id=user.id,
+        username=user.username,
+        content=chat_message.content,
+        created_at=chat_message.created_at,
+    )
+    event = {"type": "chat:message", "message": message.model_dump(mode="json")}
+    await manager.broadcast(board_id, event)
+    await manager.publish(board_id, event)
+    return message
 
 
 @router.delete("/boards/{board_id}/members/{member_user_id}", status_code=204)
