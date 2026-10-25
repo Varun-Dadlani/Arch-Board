@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { IoMdChatbubbles, IoMdRefresh } from 'react-icons/io'
 import {
   addEdge,
   applyEdgeChanges,
@@ -6,6 +7,8 @@ import {
   Background,
   Controls,
   ReactFlow,
+  ReactFlowProvider,
+  useReactFlow,
   useEdgesState,
   useNodesState,
 } from '@xyflow/react'
@@ -91,7 +94,8 @@ function clearStoredDraft(boardId) {
   } catch {}
 }
 
-export default function App() {
+function AppContent() {
+  const { screenToFlowPosition } = useReactFlow()
   const [board, setBoard] = useState(null)
   const [boards, setBoards] = useState([])
   const [nodes, setNodes] = useNodesState([])
@@ -115,7 +119,7 @@ export default function App() {
 
   const [members, setMembers] = useState([])
   const [activeMemberIds, setActiveMemberIds] = useState(new Set())
-  const [memberUserId, setMemberUserId] = useState('')
+  const [memberEmail, setMemberEmail] = useState('')
   const [memberRole, setMemberRole] = useState('editor')
   const [memberLoading, setMemberLoading] = useState(false)
   const [membersLoading, setMembersLoading] = useState(false)
@@ -134,6 +138,7 @@ export default function App() {
   const [isChatSending, setIsChatSending] = useState(false)
   const [chatError, setChatError] = useState('')
   const [chatReloadKey, setChatReloadKey] = useState(0)
+  const [chatUnreadCount, setChatUnreadCount] = useState(0)
   const isViewer = boardRole === 'viewer'
   const isOwner = boardRole === 'owner'
   const editingMember = members.find(member => member.user_id === editingMemberRoleId)
@@ -147,6 +152,7 @@ export default function App() {
   const hydratedBoardRef = useRef(null)
   const dirtyRef = useRef(false)
   const chatMessagesEndRef = useRef(null)
+  const chatShouldAutoScrollRef = useRef(true)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -165,11 +171,17 @@ export default function App() {
     setChatDraft('')
     setChatError('')
     setChatReloadKey(0)
+    setChatUnreadCount(0)
+    chatShouldAutoScrollRef.current = true
   }, [board?.id])
 
   useEffect(() => {
-    if (!isChatOpen) return
-    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+    if (!isChatOpen || !chatShouldAutoScrollRef.current) return
+
+    const container = chatMessagesEndRef.current?.parentElement
+    if (!container) return
+
+    container.scrollTop = container.scrollHeight
   }, [chatMessages, isChatOpen])
 
   useEffect(() => {
@@ -317,9 +329,9 @@ export default function App() {
   const addBoardMember = async () => {
     if (!board) return
 
-    const userId = memberUserId.trim()
-    if (!userId) {
-      setMemberError('Please enter the user ID.')
+    const email = memberEmail.trim()
+    if (!email) {
+      setMemberError('Please enter the member email.')
       return
     }
 
@@ -331,7 +343,7 @@ export default function App() {
       const response = await fetch(`${API_URL}/boards/${board.id}/members`, {
         method: 'POST',
         headers: authHeaders(true),
-        body: JSON.stringify({ user_id: userId, role: memberRole }),
+        body: JSON.stringify({ email, role: memberRole }),
       })
 
       if (response.status === 401) {
@@ -343,7 +355,8 @@ export default function App() {
         const detail = await response.json().catch(() => ({}))
         throw new Error(detail.detail || 'User is already a member of this board.')
       }
-      if (response.status === 422) throw new Error('Invalid user ID. Please enter a valid UUID.')
+      if (response.status === 404) throw new Error('No user found with this email address.')
+      if (response.status === 422) throw new Error('Please enter a valid email address.')
       if (!response.ok) {
         const detail = await response.json().catch(() => ({}))
         throw new Error(detail.detail || 'Could not add member.')
@@ -351,7 +364,7 @@ export default function App() {
 
       await loadMembers(board.id)
       setMemberSuccess('Member added successfully.')
-      setMemberUserId('')
+      setMemberEmail('')
     } catch (error) {
       console.error('Failed to add board member:', error)
       setMemberError(error.message || 'Could not add member.')
@@ -797,10 +810,11 @@ export default function App() {
     }
   }
 
-  const addNode = item => {
+  const addNode = (item, position) => {
     if (isViewer) return
     dirtyRef.current = true
     const next = makeNode(item, nodes.length)
+    if (position) next.position = position
 
     setNodes(current => {
       const updated = [...current, next]
@@ -873,7 +887,12 @@ export default function App() {
         }
 
         if (message.type === 'chat:message' && message.message) {
-          setChatMessages(current => mergeChatMessages(current, [message.message]))
+          const nextMessage = message.message
+          const isOwnMessage = nextMessage.user_id === authUser.id
+          setChatMessages(current => mergeChatMessages(current, [nextMessage]))
+          if (!isOwnMessage && !isChatOpen) {
+            setChatUnreadCount(current => current + 1)
+          }
           return
         }
 
@@ -1047,8 +1066,15 @@ export default function App() {
           <section className="members-panel" aria-labelledby="members-heading">
             <div className="members-panel-heading">
               <h2 id="members-heading">Board members</h2>
-              <button className="members-refresh" onClick={() => loadMembers(board.id)} disabled={membersLoading}>
-                {membersLoading ? 'Loading' : 'Refresh'}
+              <button
+                type="button"
+                className="members-refresh"
+                onClick={() => loadMembers(board.id)}
+                disabled={membersLoading}
+                aria-label={membersLoading ? 'Refreshing members' : 'Refresh members'}
+                title={membersLoading ? 'Refreshing members' : 'Refresh members'}
+              >
+                <IoMdRefresh aria-hidden="true" />
               </button>
             </div>
             <p className="members-summary">
@@ -1138,12 +1164,13 @@ export default function App() {
                 className="member-add-form"
                 onSubmit={event => { event.preventDefault(); addBoardMember() }}
               >
-                <label htmlFor="member-user-id">Add a member</label>
+                <label htmlFor="member-email">Add a member</label>
                 <input
-                  id="member-user-id"
-                  value={memberUserId}
-                  onChange={event => { setMemberUserId(event.target.value); setMemberError(''); setMemberSuccess('') }}
-                  placeholder="User UUID"
+                  id="member-email"
+                  type="email"
+                  value={memberEmail}
+                  onChange={event => { setMemberEmail(event.target.value); setMemberError(''); setMemberSuccess('') }}
+                  placeholder="Member email"
                   disabled={memberLoading}
                   required
                 />
@@ -1151,7 +1178,7 @@ export default function App() {
                   <option value="editor">Editor</option>
                   <option value="viewer">Viewer</option>
                 </select>
-                <button className="primary" type="submit" disabled={memberLoading || !memberUserId.trim()}>
+                <button className="primary" type="submit" disabled={memberLoading || !memberEmail.trim()}>
                   {memberLoading ? 'Adding...' : 'Add member'}
                 </button>
               </form>
@@ -1164,20 +1191,37 @@ export default function App() {
 
         <div className="catalog-heading">
           <span>Component library</span>
-          <small>{nodeCatalog.reduce((total, section) => total + section.items.length, 0)} components</small>
         </div>
 
-        {nodeCatalog.map(section => (
-          <section key={section.group}>
-            <h2>{section.group}</h2>
-            {section.items.map(item => (
-              <button className="node-button" key={item.technology} onClick={() => addNode(item)} disabled={!board || isViewer}>
-                <span>{item.label}</span>
-                <small>{item.kind}</small>
-              </button>
-            ))}
-          </section>
-        ))}
+        <div className="component-categories">
+          {nodeCatalog.map(section => (
+            <details className="component-category" key={section.group}>
+              <summary>
+                <span>{section.group}</span>
+                <span className="component-category-chevron" aria-hidden="true" />
+              </summary>
+              <div className="component-category-items">
+                {section.items.map(item => (
+                  <button
+                    className="node-button"
+                    key={item.technology}
+                    onClick={() => addNode(item)}
+                    onDragStart={event => {
+                      event.dataTransfer.setData('application/archboard-component', JSON.stringify(item))
+                      event.dataTransfer.effectAllowed = 'copy'
+                    }}
+                    draggable={Boolean(board) && !isViewer}
+                    disabled={!board || isViewer}
+                    title={isViewer ? 'Viewers cannot add components' : 'Click or drag onto the board'}
+                  >
+                    <span>{item.label}</span>
+                    <small>{item.kind}</small>
+                  </button>
+                ))}
+              </div>
+            </details>
+          ))}
+        </div>
       </aside>
 
       <section className="workspace">
@@ -1235,14 +1279,23 @@ export default function App() {
 
             {board && (
               <button
-                className={`secondary chat-toggle ${isChatOpen ? 'is-active' : ''}`}
+                className={`secondary chat-toggle ${isChatOpen ? 'is-active' : ''} ${chatUnreadCount > 0 ? 'has-unread' : ''}`}
                 type="button"
-                onClick={() => setIsChatOpen(open => !open)}
+                onClick={() => {
+                  setIsChatOpen(open => {
+                    const nextOpen = !open
+                    if (nextOpen) {
+                      setChatUnreadCount(0)
+                      chatShouldAutoScrollRef.current = true
+                    }
+                    return nextOpen
+                  })
+                }}
                 aria-expanded={isChatOpen}
                 aria-controls="board-chat-panel"
               >
-                <span aria-hidden="true">▱</span>
-                Group chat
+                <IoMdChatbubbles className="chat-toggle-icon" aria-hidden="true" />
+                <span>Group chat</span>
               </button>
             )}
 
@@ -1254,7 +1307,31 @@ export default function App() {
           </div>
         </header>
 
-        <div className="canvas-wrap">
+        <div
+          className="canvas-wrap"
+          onDragOver={event => {
+            if (event.dataTransfer.types.includes('application/archboard-component')) {
+              event.preventDefault()
+              event.dataTransfer.dropEffect = 'copy'
+            }
+          }}
+          onDrop={event => {
+            const itemData = event.dataTransfer.getData('application/archboard-component')
+            if (!itemData || !board || isViewer) return
+            event.preventDefault()
+            try {
+              const item = JSON.parse(itemData)
+              if (!nodeCatalog.some(section => section.items.some(catalogItem =>
+                catalogItem.technology === item.technology &&
+                catalogItem.label === item.label &&
+                catalogItem.kind === item.kind
+              ))) return
+              addNode(item, screenToFlowPosition({ x: event.clientX, y: event.clientY }))
+            } catch (error) {
+              console.error('Could not add dropped component:', error)
+            }
+          }}
+        >
           <ReactFlow
             nodes={nodes}
             edges={edges}
@@ -1341,7 +1418,16 @@ export default function App() {
               </button>
             </header>
 
-            <div className="chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+            <div
+              className="chat-messages"
+              role="log"
+              aria-live="polite"
+              aria-relevant="additions"
+              onScroll={event => {
+                const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
+                chatShouldAutoScrollRef.current = scrollHeight - scrollTop - clientHeight < 48
+              }}
+            >
               {isChatLoading && chatMessages.length === 0 && (
                 <p className="chat-state">Loading conversation...</p>
               )}
@@ -1559,5 +1645,13 @@ export default function App() {
         </div>
       )}
     </main>
+  )
+}
+
+export default function App() {
+  return (
+    <ReactFlowProvider>
+      <AppContent />
+    </ReactFlowProvider>
   )
 }

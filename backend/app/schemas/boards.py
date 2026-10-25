@@ -36,7 +36,7 @@ class BoilerplateCreate(BaseModel):
     document: dict[str, Any] | None = None
 
 class BoardMemberAdd(BaseModel):
-    user_id: UUID
+    email: str = Field(min_length=1, max_length=320)
     role: Literal["editor", "viewer"] = "editor"
 
 class BoardMemberRoleUpdate(BaseModel):

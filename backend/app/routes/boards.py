@@ -192,12 +192,21 @@ async def add_board_member(
     if not board_member or board_member.role != "owner":
         raise HTTPException(status_code=403, detail="Access denied")
     
+    target_user = await db.scalar(select(User).where(User.email == payload.email.strip().lower()))
+    if not target_user:
+        raise HTTPException(status_code=404, detail="No user found with this email address")
+
     # Check if the user to be added is already a member
-    existing_member = await db.scalar(select(BoardMember).where(BoardMember.board_id == board_id, BoardMember.user_id == payload.user_id))
+    existing_member = await db.scalar(
+        select(BoardMember).where(
+            BoardMember.board_id == board_id,
+            BoardMember.user_id == target_user.id,
+        )
+    )
     if existing_member:
         raise HTTPException(status_code=400, detail="User is already a member of the board")
     
-    new_member = BoardMember(board_id=board_id, user_id=payload.user_id, role=payload.role)
+    new_member = BoardMember(board_id=board_id, user_id=target_user.id, role=payload.role)
     db.add(new_member)
     await db.commit()
     await manager.broadcast(board_id, {"type": "members:changed"})

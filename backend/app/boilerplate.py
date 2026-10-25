@@ -14,9 +14,9 @@ def _technologies(document: dict[str, Any]) -> set[str]:
 
 def generate_boilerplate(name: str, document: dict[str, Any]) -> dict[str, Any]:
     technologies = _technologies(document)
-    project_name = "-".join(name.lower().split()) or "architecture-starter"
+    project_name = name or "architecture-starter"
     files: dict[str, Any] = {
-        "README.md": f"# {name}\n\nGenerated starter project from ARCH-BOARD.\n",
+        "README.md": f"# {project_name}\n\nGenerated starter project from ARCH-BOARD.\n",
         ".gitignore": "__pycache__/\n.env\nnode_modules/\n",
     }
 
