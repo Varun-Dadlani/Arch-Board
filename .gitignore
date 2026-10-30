@@ -12,4 +12,5 @@ benchmark_websockets.py
 benchmark_redis.py
 test_redis_pub-sub.py
 test.py
-
+Light mode (redesigned)-html
+Dark mode-html

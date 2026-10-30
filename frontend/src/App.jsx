@@ -1,11 +1,42 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { IoMdChatbubbles, IoMdRefresh } from 'react-icons/io'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { IoMdRefresh } from 'react-icons/io'
+import {
+  FiBox,
+  FiChevronDown,
+  FiChevronUp,
+  FiCode,
+  FiDownload,
+  FiFile,
+  FiHardDrive,
+  FiLogOut,
+  FiMessageCircle,
+  FiMoon,
+  FiSun,
+  FiTrash2,
+} from 'react-icons/fi'
+import {
+  SiAngular,
+  SiDjango,
+  SiExpress,
+  SiFastapi,
+  SiMongodb,
+  SiMysql,
+  SiPostgresql,
+  SiRabbitmq,
+  SiReact,
+  SiRedis,
+  SiSpringboot,
+  SiVuedotjs,
+} from 'react-icons/si'
 import {
   addEdge,
   applyEdgeChanges,
   applyNodeChanges,
   Background,
+  ConnectionMode,
   Controls,
+  Handle,
+  Position,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
@@ -19,6 +50,44 @@ const WS_URL = import.meta.env.VITE_WS_URL || API_URL.replace(/^http/, 'ws')
 const TOKEN_KEY = 'archboard_access_token'
 const THEME_KEY = 'archboard_theme'
 const emptyDocument = { nodes: [], edges: [] }
+const technologyIcons = {
+  react: { Icon: SiReact, color: '#61dafb' },
+  angular: { Icon: SiAngular, color: '#dd0031' },
+  vue: { Icon: SiVuedotjs, color: '#42b883' },
+  fastapi: { Icon: SiFastapi, color: '#009688' },
+  django: { Icon: SiDjango, color: '#44b78b' },
+  express: { Icon: SiExpress, color: '#9ba8bf' },
+  'spring-boot': { Icon: SiSpringboot, color: '#6db33f' },
+  postgresql: { Icon: SiPostgresql, color: '#4169e1' },
+  mongodb: { Icon: SiMongodb, color: '#47a248' },
+  mysql: { Icon: SiMysql, color: '#4479a1' },
+  redis: { Icon: SiRedis, color: '#ff4438' },
+  rabbitmq: { Icon: SiRabbitmq, color: '#ff6600' },
+  'object-storage': { Icon: FiHardDrive, color: '#a78bfa' },
+}
+
+function ArchitectureNode({ data, selected }) {
+  const { Icon, color } = technologyIcons[data.technology] || { Icon: FiBox, color: 'var(--blue)' }
+  const connectedHandles = data.connectedHandles || []
+
+  return (
+    <div className={`architecture-node${selected ? ' is-selected' : ''}`}>
+      <Handle id="top-target" className={connectedHandles.includes('top-target') ? 'is-connected' : ''} type="source" position={Position.Top} />
+      <Handle id="right-source" className={connectedHandles.includes('right-source') ? 'is-connected' : ''} type="source" position={Position.Right} />
+      <Handle id="bottom-source" className={connectedHandles.includes('bottom-source') ? 'is-connected' : ''} type="source" position={Position.Bottom} />
+      <Handle id="left-target" className={connectedHandles.includes('left-target') ? 'is-connected' : ''} type="source" position={Position.Left} />
+      <span className="architecture-node-icon" aria-hidden="true">
+        <Icon style={{ color }} />
+      </span>
+      <span className="architecture-node-label" title={data.label}>{data.label}</span>
+    </div>
+  )
+}
+
+const nodeTypes = {
+  architecture: ArchitectureNode,
+  default: ArchitectureNode,
+}
 
 function getAccessToken() {
   return localStorage.getItem(TOKEN_KEY)
@@ -35,10 +104,9 @@ function authHeaders(includeJson = false) {
 function makeNode(item, index) {
   return {
     id: crypto.randomUUID(),
-    type: 'default',
+    type: 'architecture',
     position: { x: 120 + (index % 3) * 220, y: 100 + Math.floor(index / 3) * 140 },
     data: { label: item.label, kind: item.kind, technology: item.technology },
-    style: { borderRadius: 10, border: '1px solid #52627a', padding: 10 },
   }
 }
 
@@ -54,6 +122,85 @@ function mergeChatMessages(current, incoming) {
   incoming.forEach(message => messagesById.set(message.id, message))
   return [...messagesById.values()].sort((left, right) =>
     new Date(left.created_at).getTime() - new Date(right.created_at).getTime()
+  )
+}
+
+function getChatDateKey(value) {
+  const date = new Date(value)
+  return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
+}
+
+function formatChatDate(value) {
+  const date = new Date(value)
+  const today = new Date()
+  const yesterday = new Date(today)
+  yesterday.setDate(today.getDate() - 1)
+
+  if (getChatDateKey(date) === getChatDateKey(today)) return 'Today'
+  if (getChatDateKey(date) === getChatDateKey(yesterday)) return 'Yesterday'
+
+  return date.toLocaleDateString([], {
+    month: 'long',
+    day: 'numeric',
+    ...(date.getFullYear() === today.getFullYear() ? {} : { year: 'numeric' }),
+  })
+}
+
+function AppDialog({ dialog, onClose }) {
+  const dialogRef = useRef(null)
+
+  useEffect(() => {
+    const element = dialogRef.current
+    if (!element) return
+
+    if (dialog && !element.open) element.showModal()
+    if (!dialog && element.open) element.close()
+  }, [dialog])
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className="app-dialog"
+      aria-labelledby={dialog ? 'app-dialog-title' : undefined}
+      aria-describedby={dialog ? 'app-dialog-message' : undefined}
+      onCancel={event => {
+        event.preventDefault()
+        onClose()
+      }}
+    >
+      {dialog && (
+        <>
+          <div className="app-dialog-main">
+            <div className={`app-dialog-icon ${dialog.isDanger ? 'is-danger' : ''}`} aria-hidden="true">
+              {dialog.isDanger ? '!' : 'i'}
+            </div>
+            <div className="app-dialog-copy">
+              <h2 id="app-dialog-title">{dialog.title}</h2>
+              <p id="app-dialog-message">{dialog.message}</p>
+            </div>
+          </div>
+          <div className="app-dialog-actions">
+            {dialog.onConfirm && (
+              <button className="secondary" type="button" onClick={onClose}>
+                Cancel
+              </button>
+            )}
+            <button
+              className={dialog.isDanger && dialog.onConfirm ? 'danger-button' : 'primary'}
+              type="button"
+              autoFocus
+              onClick={() => {
+                const confirm = dialog.onConfirm
+                onClose()
+                confirm?.()
+              }}
+            >
+              {dialog.confirmLabel || (dialog.onConfirm ? 'Confirm' : 'Got it')}
+            </button>
+          </div>
+        </>
+      )}
+    </dialog>
   )
 }
 
@@ -100,12 +247,36 @@ function AppContent() {
   const [boards, setBoards] = useState([])
   const [nodes, setNodes] = useNodesState([])
   const [edges, setEdges] = useEdgesState([])
+  const nodesWithConnectedHandles = useMemo(() => {
+    const connectedHandlesByNode = new Map()
+    edges.forEach(edge => {
+      if (edge.sourceHandle) {
+        const handles = connectedHandlesByNode.get(edge.source) || []
+        handles.push(edge.sourceHandle)
+        connectedHandlesByNode.set(edge.source, handles)
+      }
+      if (edge.targetHandle) {
+        const handles = connectedHandlesByNode.get(edge.target) || []
+        handles.push(edge.targetHandle)
+        connectedHandlesByNode.set(edge.target, handles)
+      }
+    })
+
+    return nodes.map(node => ({
+      ...node,
+      data: {
+        ...node.data,
+        connectedHandles: connectedHandlesByNode.get(node.id) || [],
+      },
+    }))
+  }, [edges, nodes])
   const [name, setName] = useState('')
   const [isCreateBoardOpen, setIsCreateBoardOpen] = useState(false)
   const [createBoardName, setCreateBoardName] = useState('')
   const [createBoardError, setCreateBoardError] = useState('')
   const [isCreatingBoard, setIsCreatingBoard] = useState(false)
   const [isEmptyBoardDialogOpen, setIsEmptyBoardDialogOpen] = useState(false)
+  const [appDialog, setAppDialog] = useState(null)
   const [status, setStatus] = useState('Create a board to start collaborating.')
   const [boilerplate, setBoilerplate] = useState(null)
   const [boilerplateCollapsed, setBoilerplateCollapsed] = useState(false)
@@ -115,6 +286,7 @@ function AppContent() {
   const [authMode, setAuthMode] = useState('login')
   const [authForm, setAuthForm] = useState({ username: '', email: '', password: '' })
   const [authError, setAuthError] = useState('')
+  const [authSuccess, setAuthSuccess] = useState('')
   const [theme, setTheme] = useState(() => localStorage.getItem(THEME_KEY) || 'dark')
 
   const [members, setMembers] = useState([])
@@ -215,6 +387,7 @@ function AppContent() {
     setBoilerplate(null)
     setBoilerplateCollapsed(false)
     hydratedBoardRef.current = null
+    window.history.replaceState({}, '', window.location.pathname)
     setStatus('Signed out.')
   }, [setEdges, setNodes])
 
@@ -284,6 +457,7 @@ function AppContent() {
   const submitAuth = async (event) => {
     event.preventDefault()
     setAuthError('')
+    setAuthSuccess('')
 
     const endpoint = authMode === 'login' ? '/auth/login' : '/auth/register'
     const payload = authMode === 'login'
@@ -305,7 +479,7 @@ function AppContent() {
       if (authMode === 'register') {
         setAuthMode('login')
         setAuthForm({ username: '', email: authForm.email, password: '' })
-        setStatus('Account created. Sign in to continue.')
+        setAuthSuccess('Account created successfully. Please sign in with your email and password.')
         return
       }
 
@@ -375,7 +549,6 @@ function AppContent() {
 
   const removeBoardMember = async member => {
     if (!board || !isOwner || member.role === 'owner') return
-    if (!window.confirm(`Remove ${member.username} from this board?`)) return
 
     setMemberMenuUserId(null)
     setEditingMemberRoleId(null)
@@ -409,6 +582,17 @@ function AppContent() {
     } finally {
       setRemovingMemberId(null)
     }
+  }
+
+  const requestRemoveBoardMember = member => {
+    if (!board || !isOwner || member.role === 'owner') return
+    setAppDialog({
+      title: 'Remove board member?',
+      message: `${member.username} will lose access to this board and its group chat.`,
+      confirmLabel: 'Remove member',
+      isDanger: true,
+      onConfirm: () => removeBoardMember(member),
+    })
   }
 
   const updateBoardMemberRole = async member => {
@@ -622,8 +806,14 @@ function AppContent() {
         logout()
         return
       }
-      if (response.status === 403) throw new Error('You do not have access to this board')
-      if (response.status === 404) throw new Error('Board not found')
+      if (response.status === 403 || response.status === 404) {
+        if (loadId === boardLoadRef.current) {
+          hydratedBoardRef.current = null
+          window.history.replaceState({}, '', window.location.pathname)
+          setStatus('Create a board to start collaborating.')
+        }
+        return
+      }
       if (!response.ok) throw new Error('Could not load board')
 
       const loadedBoard = await response.json()
@@ -700,9 +890,6 @@ function AppContent() {
   const deleteBoard = async () => {
     if (!board) return
 
-    const confirmed = window.confirm(`Delete "${board.name}"? This action cannot be undone.`)
-    if (!confirmed) return
-
     try {
       const boardId = board.id
       boardListRequestRef.current += 1
@@ -744,9 +931,23 @@ function AppContent() {
       setStatus('Board deleted.')
     } catch (error) {
       console.error('Could not delete board:', error)
-      alert(error.message || 'Could not delete board.')
+      setAppDialog({
+        title: 'Could not delete board',
+        message: error.message || 'Please try again.',
+      })
       setStatus(error.message || 'Could not delete board.')
     }
+  }
+
+  const requestDeleteBoard = () => {
+    if (!board) return
+    setAppDialog({
+      title: 'Delete this board?',
+      message: `"${board.name}" and its architecture will be permanently deleted. This action cannot be undone.`,
+      confirmLabel: 'Delete board',
+      isDanger: true,
+      onConfirm: deleteBoard,
+    })
   }
 
   const createBoilerplate = async () => {
@@ -929,6 +1130,7 @@ function AppContent() {
 
     socket.onclose = event => {
       console.log(`WebSocket disconnected for board ${boardId}`, event.code)
+      if (socketRef.current !== socket) return
       if (event.code === 1008) {
         dirtyRef.current = false
         hydratedBoardRef.current = null
@@ -994,9 +1196,11 @@ function AppContent() {
           <p className="auth-lead">Map your architecture, align your team, and leave with a working starting point.</p>
 
           <div className="auth-tabs">
-            <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthError('') }}>Sign in</button>
-            <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => { setAuthMode('register'); setAuthError('') }}>Register</button>
+            <button type="button" className={authMode === 'login' ? 'active' : ''} onClick={() => { setAuthMode('login'); setAuthError(''); setAuthSuccess('') }}>Sign in</button>
+            <button type="button" className={authMode === 'register' ? 'active' : ''} onClick={() => { setAuthMode('register'); setAuthError(''); setAuthSuccess('') }}>Register</button>
           </div>
+
+          {authSuccess && <p className="auth-success" role="status">{authSuccess}</p>}
 
           <form onSubmit={submitAuth}>
             {authMode === 'register' && (
@@ -1004,7 +1208,7 @@ function AppContent() {
                 Username
                 <input
                   value={authForm.username}
-                  onChange={event => setAuthForm({ ...authForm, username: event.target.value })}
+                  onChange={event => { setAuthForm({ ...authForm, username: event.target.value }); setAuthSuccess('') }}
                   placeholder="Your name"
                   minLength="1"
                   maxLength="160"
@@ -1018,7 +1222,7 @@ function AppContent() {
               <input
                 type="email"
                 value={authForm.email}
-                onChange={event => setAuthForm({ ...authForm, email: event.target.value })}
+                onChange={event => { setAuthForm({ ...authForm, email: event.target.value }); setAuthSuccess('') }}
                 placeholder="you@company.com"
                 maxLength="320"
                 required
@@ -1030,7 +1234,7 @@ function AppContent() {
               <input
                 type="password"
                 value={authForm.password}
-                onChange={event => setAuthForm({ ...authForm, password: event.target.value })}
+                onChange={event => { setAuthForm({ ...authForm, password: event.target.value }); setAuthSuccess('') }}
                 placeholder="8 or more characters"
                 minLength="8"
                 maxLength="128"
@@ -1142,7 +1346,7 @@ function AppContent() {
                               <button
                                 className="member-action-option is-danger"
                                 type="button"
-                                onClick={() => removeBoardMember(member)}
+                                onClick={() => requestRemoveBoardMember(member)}
                                 disabled={removingMemberId === member.user_id}
                               >
                                 Remove
@@ -1226,27 +1430,78 @@ function AppContent() {
 
       <section className="workspace">
         <header className="topbar">
-          {board && (
-            <div className="board-title">
-              <span className="eyebrow">CURRENT BOARD</span>
-              <input
-                value={name}
-                readOnly={isViewer}
-                onChange={event => { dirtyRef.current = true; setName(event.target.value) }}
-                aria-label="Board name"
-              />
-            </div>
-          )}
-
-          <div className="actions">
-            <div className="account-chip">
-              <span className="avatar">{authUser.username.slice(0, 1).toUpperCase()}</span>
-              <div>
-                <strong>{authUser.username}</strong>
-                <small>Architect</small>
+          <div className="topbar-left">
+            {board && (
+              <div className="board-title">
+                <span className="eyebrow">CURRENT BOARD</span>
+                <input
+                  value={name}
+                  readOnly={isViewer}
+                  onChange={event => { dirtyRef.current = true; setName(event.target.value) }}
+                  aria-label="Board name"
+                />
               </div>
-              <button className="text-button" onClick={logout}>Sign out</button>
+            )}
+
+            <div className="topbar-board-actions">
+              <select
+                className="board-picker"
+                value={board?.id || ''}
+                onChange={event => {
+                  const nextSelection = event.target.value
+                  if (nextSelection === 'new-board') {
+                    openCreateBoard()
+                    return
+                  }
+                  handleBoardSelection(nextSelection)
+                }}
+                aria-label="Select a board or create a new one"
+              >
+                <option value="" disabled>Select a board</option>
+                <option value="new-board">+ New board</option>
+                {boards.map(savedBoard => (
+                  <option key={savedBoard.id} value={savedBoard.id}>{savedBoard.name}</option>
+                ))}
+              </select>
+
+              {board && isOwner && <button className="secondary danger-button" onClick={requestDeleteBoard}><FiTrash2 aria-hidden="true" /><span>Delete board</span></button>}
+              {board && !isViewer && <button className="secondary generate-button" onClick={createBoilerplate}><FiCode aria-hidden="true" /><span>Generate code</span></button>}
+              {board && isViewer && <button className="secondary generate-button" onClick={downloadBoilerplate}><FiDownload aria-hidden="true" /><span>Download boilerplate</span></button>}
+              {board && !isViewer && <button className="primary" onClick={saveBoard}>Save changes</button>}
             </div>
+          </div>
+
+          <div className="topbar-account-actions">
+            <details
+              className="profile-menu"
+              onKeyDown={event => {
+                if (event.key === 'Escape') event.currentTarget.open = false
+              }}
+            >
+              <summary className="profile-trigger" aria-label="Open profile menu">
+                <span className="avatar">{authUser.username.slice(0, 1).toUpperCase()}</span>
+                <span className="profile-trigger-copy">
+                  <strong>{authUser.username}</strong>
+                  <small>Account</small>
+                </span>
+                <FiChevronDown aria-hidden="true" />
+              </summary>
+              <div className="profile-dropdown">
+                <div className="profile-dropdown-heading">
+                  <span className="avatar profile-avatar" aria-hidden="true">
+                    {authUser.username.slice(0, 1).toUpperCase()}
+                  </span>
+                  <div>
+                    <strong>{authUser.username}</strong>
+                    <span>{authUser.email}</span>
+                  </div>
+                </div>
+                <button className="profile-signout" type="button" onClick={logout}>
+                  <FiLogOut aria-hidden="true" />
+                  <span>Sign out</span>
+                </button>
+              </div>
+            </details>
 
             <button
               className="theme-toggle"
@@ -1254,56 +1509,8 @@ function AppContent() {
               aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
               title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
             >
-              {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+              {theme === 'dark' ? <FiSun aria-hidden="true" /> : <FiMoon aria-hidden="true" />}
             </button>
-
-            <select
-              className="board-picker"
-              value={board?.id || ''}
-              onChange={event => {
-                const nextSelection = event.target.value
-                if (nextSelection === 'new-board') {
-                  openCreateBoard()
-                  return
-                }
-                handleBoardSelection(nextSelection)
-              }}
-              aria-label="Select a board or create a new one"
-            >
-              <option value="" disabled>Select a board</option>
-              <option value="new-board">+ New board</option>
-              {boards.map(savedBoard => (
-                <option key={savedBoard.id} value={savedBoard.id}>{savedBoard.name}</option>
-              ))}
-            </select>
-
-            {board && (
-              <button
-                className={`secondary chat-toggle ${isChatOpen ? 'is-active' : ''} ${chatUnreadCount > 0 ? 'has-unread' : ''}`}
-                type="button"
-                onClick={() => {
-                  setIsChatOpen(open => {
-                    const nextOpen = !open
-                    if (nextOpen) {
-                      setChatUnreadCount(0)
-                      chatShouldAutoScrollRef.current = true
-                    }
-                    return nextOpen
-                  })
-                }}
-                aria-expanded={isChatOpen}
-                aria-controls="board-chat-panel"
-              >
-                <IoMdChatbubbles className="chat-toggle-icon" aria-hidden="true" />
-                <span>Group chat</span>
-              </button>
-            )}
-
-            {board && isOwner && <button className="secondary danger-button" onClick={deleteBoard}>Delete board</button>}
-
-            {board && !isViewer && <button className="secondary" onClick={createBoilerplate}>Generate code</button>}
-            {board && isViewer && <button className="secondary" onClick={downloadBoilerplate}>Download boilerplate</button>}
-            {board && !isViewer && <button className="primary" onClick={saveBoard}>Save changes</button>}
           </div>
         </header>
 
@@ -1333,7 +1540,10 @@ function AppContent() {
           }}
         >
           <ReactFlow
-            nodes={nodes}
+            proOptions={{ hideAttribution: true }}
+            connectionMode={ConnectionMode.Loose}
+            nodeTypes={nodeTypes}
+            nodes={nodesWithConnectedHandles}
             edges={edges}
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
@@ -1343,7 +1553,7 @@ function AppContent() {
             elementsSelectable={!isViewer}
             fitView
           >
-            <Background gap={20} size={1} />
+            <Background gap={24} size={1.5} />
             <Controls showFitView={false} showInteractive={false} />
           </ReactFlow>
 
@@ -1357,35 +1567,203 @@ function AppContent() {
               </button>
             </div>
           )}
+          {board && (
+            <button
+              className={`secondary chat-toggle ${isChatOpen ? 'is-active' : ''} ${chatUnreadCount > 0 ? 'has-unread' : ''}`}
+              type="button"
+              onClick={() => {
+                setIsChatOpen(open => {
+                  const nextOpen = !open
+                  if (nextOpen) {
+                    setChatUnreadCount(0)
+                    chatShouldAutoScrollRef.current = true
+                  }
+                  return nextOpen
+                })
+              }}
+              aria-label={`Group chat${chatUnreadCount > 0 ? `, ${chatUnreadCount} unread messages` : ''}`}
+              aria-expanded={isChatOpen}
+              aria-controls="board-chat-panel"
+            >
+              <FiMessageCircle className="chat-toggle-icon" aria-hidden="true" />
+              <span>Group chat</span>
+              {chatUnreadCount > 0 && (
+                <span className="chat-unread-count" aria-label={`${chatUnreadCount} unread messages`}>
+                  {chatUnreadCount > 99 ? '99+' : chatUnreadCount}
+                </span>
+              )}
+            </button>
+          )}
+          {board && isChatOpen && (
+            <section
+              className="chat-panel"
+              id="board-chat-panel"
+              role="dialog"
+              aria-label={`${board.name} group chat`}
+            >
+              <header className="chat-header">
+                <h2>Group chat</h2>
+                <button
+                  className="chat-close"
+                  type="button"
+                  onClick={() => setIsChatOpen(false)}
+                  aria-label="Close group chat"
+                >
+                  ×
+                </button>
+              </header>
+
+              <div
+                className="chat-messages"
+                role="log"
+                aria-live="polite"
+                aria-relevant="additions"
+                onScroll={event => {
+                  const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
+                  chatShouldAutoScrollRef.current = scrollHeight - scrollTop - clientHeight < 48
+                }}
+              >
+                {isChatLoading && chatMessages.length === 0 && (
+                  <p className="chat-state">Loading conversation...</p>
+                )}
+                {chatError && (
+                  <div className="chat-load-error" role="alert">
+                    <span>{chatError}</span>
+                    <button type="button" onClick={() => setChatReloadKey(current => current + 1)}>
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {!isChatLoading && !chatError && chatMessages.length === 0 && (
+                  <div className="chat-empty">
+                    <span aria-hidden="true">✦</span>
+                    <strong>Start the conversation</strong>
+                    <p>Messages here are shared with everyone on this board.</p>
+                  </div>
+                )}
+                {chatMessages.map((message, index) => {
+                  const isOwnMessage = message.user_id === authUser.id
+                  const showDateDivider = index === 0 ||
+                    getChatDateKey(chatMessages[index - 1].created_at) !== getChatDateKey(message.created_at)
+                  const dateLabel = formatChatDate(message.created_at)
+                  return (
+                    <div className="chat-message-group" key={message.id}>
+                      {showDateDivider && (
+                        <div className="chat-date-divider" role="separator" aria-label={dateLabel}>
+                          <span>{dateLabel}</span>
+                        </div>
+                      )}
+                      <article className={`chat-message ${isOwnMessage ? 'is-own-message' : ''}`}>
+                        {!isOwnMessage && (
+                          <span className="chat-message-avatar" aria-hidden="true">
+                            {message.username.slice(0, 1).toUpperCase()}
+                          </span>
+                        )}
+                        <div className="chat-message-content">
+                          <div className="chat-message-meta">
+                            <strong>{isOwnMessage ? 'You' : message.username}</strong>
+                            <time dateTime={message.created_at}>
+                              {new Date(message.created_at).toLocaleTimeString([], {
+                                hour: 'numeric',
+                                minute: '2-digit',
+                              })}
+                            </time>
+                          </div>
+                          <p>{message.content}</p>
+                        </div>
+                      </article>
+                    </div>
+                  )
+                })}
+                <div ref={chatMessagesEndRef} />
+              </div>
+
+              <form className="chat-composer" onSubmit={sendChatMessage}>
+                <label className="visually-hidden" htmlFor="chat-message-input">Write a message</label>
+                <textarea
+                  id="chat-message-input"
+                  value={chatDraft}
+                  onChange={event => {
+                    setChatDraft(event.target.value)
+                    if (chatError) setChatError('')
+                  }}
+                  onKeyDown={event => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault()
+                      event.currentTarget.form.requestSubmit()
+                    }
+                  }}
+                  placeholder="Message board members..."
+                  maxLength={2000}
+                  rows={2}
+                  disabled={isChatSending}
+                />
+                <button
+                  className="primary chat-send"
+                  type="submit"
+                  disabled={isChatSending || !chatDraft.trim()}
+                  aria-label="Send message"
+                >
+                  {isChatSending ? 'Sending...' : 'Send'}
+                </button>
+              </form>
+              <p className="chat-hint">Enter to send · Shift + Enter for a new line</p>
+            </section>
+          )}
         </div>
 
         {boilerplate && (
           <section className={`boilerplate-panel ${boilerplateCollapsed ? 'is-collapsed' : ''}`}>
             <div className="boilerplate-heading">
-              <div>
+              <div className="boilerplate-summary">
                 <span className="eyebrow">GENERATED STARTER</span>
-                <strong>{boilerplate.project_name}</strong>
-                <span>{boilerplate.technologies.join(', ') || 'No technologies selected'}</span>
+                <strong className="boilerplate-project-name">{boilerplate.project_name}</strong>
+                <span className="boilerplate-file-count">
+                  {Object.keys(boilerplate.files).length} starter files
+                </span>
+                <div className="boilerplate-technologies" aria-label="Selected technologies">
+                  {boilerplate.technologies.length > 0
+                    ? boilerplate.technologies.map(technology => (
+                      <span className="technology-tag" key={technology}>{technology}</span>
+                    ))
+                    : <span className="technology-tag">No technologies selected</span>}
+                </div>
               </div>
 
-              <button
-                className="panel-toggle"
-                onClick={() => setBoilerplateCollapsed(current => !current)}
-                aria-expanded={!boilerplateCollapsed}
-                aria-label={boilerplateCollapsed ? 'Expand generated starter' : 'Minimize generated starter'}
-                title={boilerplateCollapsed ? 'Expand panel' : 'Minimize panel'}
-              >
-                {boilerplateCollapsed ? 'Expand' : 'Minimize'}
-                <span aria-hidden="true">{boilerplateCollapsed ? '⌃' : '⌄'}</span>
-              </button>
+              <div className="boilerplate-actions">
+                <button
+                  className="panel-toggle"
+                  onClick={() => setBoilerplateCollapsed(current => !current)}
+                  aria-expanded={!boilerplateCollapsed}
+                  aria-label={boilerplateCollapsed ? 'Expand generated starter' : 'Hide starter files'}
+                  title={boilerplateCollapsed ? 'Expand starter files' : 'Hide starter files'}
+                >
+                  {boilerplateCollapsed ? <FiChevronDown aria-hidden="true" /> : <FiChevronUp aria-hidden="true" />}
+                  <span>{boilerplateCollapsed ? 'Show files' : 'Hide files'}</span>
+                </button>
 
-              <button className="secondary" onClick={downloadBoilerplate}>Download bundle</button>
+                <button className="primary boilerplate-download" onClick={downloadBoilerplate}>
+                  <FiDownload aria-hidden="true" />
+                  <span>Download project</span>
+                </button>
+              </div>
             </div>
 
             {!boilerplateCollapsed && (
-              <ul>
-                {Object.keys(boilerplate.files).map(file => <li key={file}>{file}</li>)}
-              </ul>
+              <div className="boilerplate-files">
+                <div className="boilerplate-files-heading">
+                  <span>Included in your starter</span>
+                  <span>Project structure preview</span>
+                </div>
+                <ul>
+                  {Object.keys(boilerplate.files).map(file => (
+                    <li className="boilerplate-file" key={file} title={file}>
+                      <FiFile aria-hidden="true" />
+                      <span>{file}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
             )}
           </section>
         )}
@@ -1394,120 +1772,6 @@ function AppContent() {
           <span className={board ? 'online-dot' : 'offline-dot'} />
           {status}
         </footer>
-
-        {board && isChatOpen && (
-          <section
-            className="chat-panel"
-            id="board-chat-panel"
-            role="dialog"
-            aria-label={`${board.name} group chat`}
-          >
-            <header className="chat-header">
-              <div>
-                <span className="chat-eyebrow">BOARD CONVERSATION</span>
-                <h2>Group chat</h2>
-                <p>{board.name} · {members.length} {members.length === 1 ? 'member' : 'members'}</p>
-              </div>
-              <button
-                className="chat-close"
-                type="button"
-                onClick={() => setIsChatOpen(false)}
-                aria-label="Close group chat"
-              >
-                ×
-              </button>
-            </header>
-
-            <div
-              className="chat-messages"
-              role="log"
-              aria-live="polite"
-              aria-relevant="additions"
-              onScroll={event => {
-                const { scrollTop, scrollHeight, clientHeight } = event.currentTarget
-                chatShouldAutoScrollRef.current = scrollHeight - scrollTop - clientHeight < 48
-              }}
-            >
-              {isChatLoading && chatMessages.length === 0 && (
-                <p className="chat-state">Loading conversation...</p>
-              )}
-              {chatError && (
-                <div className="chat-load-error" role="alert">
-                  <span>{chatError}</span>
-                  <button type="button" onClick={() => setChatReloadKey(current => current + 1)}>
-                    Retry
-                  </button>
-                </div>
-              )}
-              {!isChatLoading && !chatError && chatMessages.length === 0 && (
-                <div className="chat-empty">
-                  <span aria-hidden="true">✦</span>
-                  <strong>Start the conversation</strong>
-                  <p>Messages here are shared with everyone on this board.</p>
-                </div>
-              )}
-              {chatMessages.map(message => {
-                const isOwnMessage = message.user_id === authUser.id
-                return (
-                  <article
-                    className={`chat-message ${isOwnMessage ? 'is-own-message' : ''}`}
-                    key={message.id}
-                  >
-                    {!isOwnMessage && (
-                      <span className="chat-message-avatar" aria-hidden="true">
-                        {message.username.slice(0, 1).toUpperCase()}
-                      </span>
-                    )}
-                    <div className="chat-message-content">
-                      <div className="chat-message-meta">
-                        <strong>{isOwnMessage ? 'You' : message.username}</strong>
-                        <time dateTime={message.created_at}>
-                          {new Date(message.created_at).toLocaleTimeString([], {
-                            hour: 'numeric',
-                            minute: '2-digit',
-                          })}
-                        </time>
-                      </div>
-                      <p>{message.content}</p>
-                    </div>
-                  </article>
-                )
-              })}
-              <div ref={chatMessagesEndRef} />
-            </div>
-
-            <form className="chat-composer" onSubmit={sendChatMessage}>
-              <label className="visually-hidden" htmlFor="chat-message-input">Write a message</label>
-              <textarea
-                id="chat-message-input"
-                value={chatDraft}
-                onChange={event => {
-                  setChatDraft(event.target.value)
-                  if (chatError) setChatError('')
-                }}
-                onKeyDown={event => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault()
-                    event.currentTarget.form.requestSubmit()
-                  }
-                }}
-                placeholder="Message board members..."
-                maxLength={2000}
-                rows={2}
-                disabled={isChatSending}
-              />
-              <button
-                className="primary chat-send"
-                type="submit"
-                disabled={isChatSending || !chatDraft.trim()}
-                aria-label="Send message"
-              >
-                {isChatSending ? 'Sending...' : 'Send'}
-              </button>
-            </form>
-            <p className="chat-hint">Enter to send · Shift + Enter for a new line</p>
-          </section>
-        )}
       </section>
 
       {isCreateBoardOpen && (
@@ -1644,6 +1908,11 @@ function AppContent() {
           </section>
         </div>
       )}
+
+      <AppDialog
+        dialog={appDialog}
+        onClose={() => setAppDialog(null)}
+      />
     </main>
   )
 }
