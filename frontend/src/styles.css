@@ -962,6 +962,21 @@ body {
   color: #09111e;
 }
 
+.boilerplate-dismiss {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  flex: 0 0 38px;
+  padding: 0 !important;
+  width: 38px;
+}
+
+.boilerplate-dismiss:hover {
+  background: var(--panel-raised);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
+}
+
 .boilerplate-panel .boilerplate-actions .boilerplate-download span {
   color: #09111e;
   font-size: 12px;
@@ -2027,6 +2042,21 @@ textarea {
   background: var(--blue);
   color: var(--primary-text);
   font-weight: 600;
+}
+
+.chat-toggle:hover:not(.is-active) {
+  background: color-mix(in srgb, var(--blue) 82%, white 18%) !important;
+  border-color: var(--blue-bright) !important;
+}
+
+.chat-toggle:hover:not(.is-active) > span:not(.chat-unread-count),
+.chat-toggle:hover:not(.is-active) .chat-toggle-icon {
+  color: var(--primary-text);
+}
+
+.chat-toggle.is-active:hover {
+  background: var(--panel-raised) !important;
+  border-color: var(--blue) !important;
 }
 
 .app-dialog,

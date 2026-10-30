@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { IoMdRefresh } from 'react-icons/io'
 import {
   FiBox,
   FiChevronDown,
@@ -13,6 +12,7 @@ import {
   FiMoon,
   FiSun,
   FiTrash2,
+  FiX,
 } from 'react-icons/fi'
 import {
   SiAngular,
@@ -110,10 +110,24 @@ function makeNode(item, index) {
   }
 }
 
+function edgeKey(edge) {
+  const source = edge.source ?? ''
+  const sourceHandle = edge.sourceHandle ?? ''
+  const target = edge.target ?? ''
+  const targetHandle = edge.targetHandle ?? ''
+  if (!source || !target) return ''
+  return `${source}|${sourceHandle}|${target}|${targetHandle}`
+}
+
 function normalizeDocument(document) {
+  const edges = Array.isArray(document?.edges) ? document.edges : []
+  const uniqueEdges = edges.filter((edge, index, allEdges) =>
+    allEdges.findIndex(candidate => edgeKey(candidate) === edgeKey(edge)) === index
+  )
+
   return {
     nodes: Array.isArray(document?.nodes) ? document.nodes : [],
-    edges: Array.isArray(document?.edges) ? document.edges : [],
+    edges: uniqueEdges,
   }
 }
 
@@ -325,6 +339,7 @@ function AppContent() {
   const dirtyRef = useRef(false)
   const chatMessagesEndRef = useRef(null)
   const chatShouldAutoScrollRef = useRef(true)
+  const canvasWrapRef = useRef(null)
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -672,8 +687,11 @@ function AppContent() {
 
   const onConnect = useCallback((connection) => {
     if (boardRole === 'viewer') return
-    dirtyRef.current = true
     setEdges(current => {
+      const key = edgeKey(connection)
+      if (!key || current.some(edge => edgeKey(edge) === key)) return current
+
+      dirtyRef.current = true
       const next = addEdge({ ...connection, animated: true }, current)
       sendSocketMessage(socketRef, {
         type: 'document:update',
@@ -1014,10 +1032,36 @@ function AppContent() {
   const addNode = (item, position) => {
     if (isViewer) return
     dirtyRef.current = true
-    const next = makeNode(item, nodes.length)
-    if (position) next.position = position
 
     setNodes(current => {
+      let nextPosition = position
+      if (!nextPosition && canvasWrapRef.current) {
+        const rect = canvasWrapRef.current.getBoundingClientRect()
+        nextPosition = screenToFlowPosition({
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        })
+      }
+
+      if (!nextPosition) {
+        nextPosition = { x: 120 + (current.length % 3) * 220, y: 100 + Math.floor(current.length / 3) * 140 }
+      }
+
+      const occupied = current.some(node => {
+        const nodePosition = node.positionAbsolute ?? node.position
+        return Math.abs(nodePosition.x - nextPosition.x) < 180 && Math.abs(nodePosition.y - nextPosition.y) < 140
+      })
+      if (occupied) {
+        const offsets = [[220, 0], [-220, 0], [0, 140], [0, -140], [220, 140], [-220, 140], [220, -140], [-220, -140]]
+        const openOffset = offsets.find(([x, y]) => !current.some(node => {
+          const nodePosition = node.positionAbsolute ?? node.position
+          return Math.abs(nodePosition.x - (nextPosition.x + x)) < 180 && Math.abs(nodePosition.y - (nextPosition.y + y)) < 140
+        }))
+        if (openOffset) nextPosition = { x: nextPosition.x + openOffset[0], y: nextPosition.y + openOffset[1] }
+      }
+
+      const next = makeNode(item, current.length)
+      next.position = nextPosition
       const updated = [...current, next]
       sendSocketMessage(socketRef, {
         type: 'document:update',
@@ -1270,16 +1314,6 @@ function AppContent() {
           <section className="members-panel" aria-labelledby="members-heading">
             <div className="members-panel-heading">
               <h2 id="members-heading">Board members</h2>
-              <button
-                type="button"
-                className="members-refresh"
-                onClick={() => loadMembers(board.id)}
-                disabled={membersLoading}
-                aria-label={membersLoading ? 'Refreshing members' : 'Refresh members'}
-                title={membersLoading ? 'Refreshing members' : 'Refresh members'}
-              >
-                <IoMdRefresh aria-hidden="true" />
-              </button>
             </div>
             <p className="members-summary">
               {members.length} {members.length === 1 ? 'member' : 'members'}
@@ -1515,6 +1549,7 @@ function AppContent() {
         </header>
 
         <div
+          ref={canvasWrapRef}
           className="canvas-wrap"
           onDragOver={event => {
             if (event.dataTransfer.types.includes('application/archboard-component')) {
@@ -1540,6 +1575,7 @@ function AppContent() {
           }}
         >
           <ReactFlow
+            key={board?.id || 'empty-board'}
             proOptions={{ hideAttribution: true }}
             connectionMode={ConnectionMode.Loose}
             nodeTypes={nodeTypes}
@@ -1548,6 +1584,11 @@ function AppContent() {
             onNodesChange={handleNodesChange}
             onEdgesChange={handleEdgesChange}
             onConnect={onConnect}
+            isValidConnection={(connection) => {
+              if (connection.source === connection.target) return false
+              const key = edgeKey(connection)
+              return !edges.some(edge => edgeKey(edge) === key)
+            }}
             nodesDraggable={!isViewer}
             nodesConnectable={!isViewer}
             elementsSelectable={!isViewer}
@@ -1745,6 +1786,19 @@ function AppContent() {
                 <button className="primary boilerplate-download" onClick={downloadBoilerplate}>
                   <FiDownload aria-hidden="true" />
                   <span>Download project</span>
+                </button>
+
+                <button
+                  className="boilerplate-dismiss"
+                  type="button"
+                  onClick={() => {
+                    setBoilerplate(null)
+                    setBoilerplateCollapsed(false)
+                  }}
+                  aria-label="Dismiss generated starter"
+                  title="Remove generated starter"
+                >
+                  <FiX aria-hidden="true" />
                 </button>
               </div>
             </div>
