@@ -1757,11 +1757,8 @@ function AppContent() {
           <section className={`boilerplate-panel ${boilerplateCollapsed ? 'is-collapsed' : ''}`}>
             <div className="boilerplate-heading">
               <div className="boilerplate-summary">
-                <span className="eyebrow">GENERATED STARTER</span>
+                <span className="eyebrow">GENERATED PROJECT</span>
                 <strong className="boilerplate-project-name">{boilerplate.project_name}</strong>
-                <span className="boilerplate-file-count">
-                  {Object.keys(boilerplate.files).length} starter files
-                </span>
                 <div className="boilerplate-technologies" aria-label="Selected technologies">
                   {boilerplate.technologies.length > 0
                     ? boilerplate.technologies.map(technology => (
@@ -1776,10 +1773,10 @@ function AppContent() {
                   className="panel-toggle"
                   onClick={() => setBoilerplateCollapsed(current => !current)}
                   aria-expanded={!boilerplateCollapsed}
-                  aria-label={boilerplateCollapsed ? 'Expand generated starter' : 'Hide starter files'}
-                  title={boilerplateCollapsed ? 'Expand starter files' : 'Hide starter files'}
+                  aria-label={boilerplateCollapsed ? 'Expand generated project' : 'Hide generated files'}
+                  title={boilerplateCollapsed ? 'Expand generated files' : 'Hide generated files'}
                 >
-                  {boilerplateCollapsed ? <FiChevronDown aria-hidden="true" /> : <FiChevronUp aria-hidden="true" />}
+                  {boilerplateCollapsed ? <FiChevronUp aria-hidden="true" /> : <FiChevronDown aria-hidden="true" />}
                   <span>{boilerplateCollapsed ? 'Show files' : 'Hide files'}</span>
                 </button>
 
@@ -1795,8 +1792,8 @@ function AppContent() {
                     setBoilerplate(null)
                     setBoilerplateCollapsed(false)
                   }}
-                  aria-label="Dismiss generated starter"
-                  title="Remove generated starter"
+                  aria-label="Dismiss starter project"
+                  title="Remove Generated Project"
                 >
                   <FiX aria-hidden="true" />
                 </button>
@@ -1806,8 +1803,8 @@ function AppContent() {
             {!boilerplateCollapsed && (
               <div className="boilerplate-files">
                 <div className="boilerplate-files-heading">
-                  <span>Included in your starter</span>
-                  <span>Project structure preview</span>
+                  <span>Project Structure Preview </span>
+                  <span>{Object.keys(boilerplate.files).length} Files Generated </span>
                 </div>
                 <ul>
                   {Object.keys(boilerplate.files).map(file => (

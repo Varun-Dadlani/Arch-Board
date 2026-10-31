@@ -1,4 +1,4 @@
-backend/.venv
+.venv/
 backend/app/core/__pycache__/
 backend/app/routes/__pycache__/
 backend/app/models/__pycache__/
@@ -14,3 +14,4 @@ test_redis_pub-sub.py
 test.py
 Light mode (redesigned)-html
 Dark mode-html
+architecture.md
